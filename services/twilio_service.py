@@ -1,8 +1,8 @@
 import base64
 from typing import Optional
 from fastapi import Request
-from fastapi.responses import HTMLResponse
-from twilio.twiml.voice_response import VoiceResponse, Connect
+from fastapi.responses import HTMLResponse, Response
+from twilio.twiml.voice_response import VoiceResponse, Connect, Gather, Say
 
 
 class TwilioService:
@@ -53,177 +53,132 @@ class TwilioService:
         return HTMLResponse(content=str(response), media_type="application/xml")
     
     @staticmethod
-    def create_media_message(stream_sid: str, audio_payload: str) -> dict:
+    def create_feedback_twiml(backend_url: str) -> str:
         """
-        Create a Twilio media message with audio payload.
+        Create TwiML for feedback collection after demo expires.
         
         Args:
-            stream_sid: Twilio stream identifier
-            audio_payload: Base64 encoded audio data
+            backend_url: Base URL of backend for callback
             
         Returns:
-            Dictionary containing Twilio media message
+            TwiML XML string
         """
-        return {
-            "event": "media",
-            "streamSid": stream_sid,
-            "media": {
-                "payload": audio_payload
-            }
-        }
+        response = VoiceResponse()
+        
+        # Demo expiry message
+        response.say(
+            "Your demo session has expired. We hope you enjoyed it!",
+            voice=TwilioService.TWILIO_VOICE
+        )
+        response.pause(length=1)
+        
+        # Sales message
+        response.say(
+            "To get VOX A.I. for your business, contact sales at finlumina dot com.",
+            voice=TwilioService.TWILIO_VOICE
+        )
+        response.pause(length=1)
+        
+        # 🔥 CLEAR instructions for feedback
+        response.say(
+            "Please rate your experience from 1 to 5, with 5 being excellent.",
+            voice=TwilioService.TWILIO_VOICE
+        )
+        response.pause(length=0.5)
+        response.say(
+            "Press a number on your phone keypad now. Press 1, 2, 3, 4, or 5.",
+            voice=TwilioService.TWILIO_VOICE
+        )
+        
+        # Gather rating
+        gather = Gather(
+            num_digits=1,
+            timeout=10,
+            action=f"{backend_url}/demo-rating",
+            method="POST"
+        )
+        response.append(gather)
+        
+        # Timeout fallback
+        response.say(
+            "We didn't receive your rating. Thank you for trying VOX A.I. Goodbye!",
+            voice=TwilioService.TWILIO_VOICE
+        )
+        
+        return str(response)
     
     @staticmethod
-    def create_mark_message(stream_sid: str, mark_name: str = "responsePart") -> dict:
+    def create_rating_response_twiml(rating: int) -> str:
         """
-        Create a Twilio mark message for audio synchronization.
+        Create TwiML response after receiving rating.
         
         Args:
-            stream_sid: Twilio stream identifier
-            mark_name: Name of the mark for identification
+            rating: User's rating (1-5)
             
         Returns:
-            Dictionary containing Twilio mark message
+            TwiML XML string
         """
-        return {
-            "event": "mark",
-            "streamSid": stream_sid,
-            "mark": {"name": mark_name}
-        }
+        response = VoiceResponse()
+        
+        # Thank user
+        stars = "⭐" * rating
+        response.say(
+            f"Thank you for rating us {rating} out of 5!",
+            voice=TwilioService.TWILIO_VOICE
+        )
+        response.pause(length=0.5)
+        response.say(
+            "We appreciate your feedback.",
+            voice=TwilioService.TWILIO_VOICE
+        )
+        response.pause(length=0.5)
+        response.say(
+            "Visit finlumina dot com to learn more. Goodbye!",
+            voice=TwilioService.TWILIO_VOICE
+        )
+        
+        # Hang up
+        response.hangup()
+        
+        return str(response)
     
     @staticmethod
-    def create_clear_message(stream_sid: str) -> dict:
+    def create_invalid_rating_twiml(backend_url: str) -> str:
         """
-        Create a Twilio clear message to clear audio buffer.
+        Create TwiML for invalid rating (not 1-5).
         
         Args:
-            stream_sid: Twilio stream identifier
+            backend_url: Base URL of backend for callback
             
         Returns:
-            Dictionary containing Twilio clear message
+            TwiML XML string
         """
-        return {
-            "event": "clear",
-            "streamSid": stream_sid
-        }
-    
-    @staticmethod
-    def convert_openai_audio_to_twilio(openai_audio_delta: str) -> str:
-        """
-        Convert OpenAI audio delta format to Twilio-compatible format.
+        response = VoiceResponse()
         
-        OpenAI provides base64 encoded audio, which we need to re-encode
-        for Twilio's expected format.
+        response.say(
+            "Sorry, please rate between 1 and 5 only.",
+            voice=TwilioService.TWILIO_VOICE
+        )
+        response.pause(length=0.5)
+        response.say(
+            "Let's try again. Press a number from 1 to 5 on your keypad.",
+            voice=TwilioService.TWILIO_VOICE
+        )
         
-        Args:
-            openai_audio_delta: Base64 encoded audio from OpenAI
-            
-        Returns:
-            Base64 encoded audio payload for Twilio
-        """
-        # Decode and re-encode to ensure proper format for Twilio
-        return base64.b64encode(base64.b64decode(openai_audio_delta)).decode('utf-8')
-    
-    @staticmethod
-    def extract_stream_id(start_event_data: dict) -> Optional[str]:
-        """
-        Extract stream ID from Twilio start event data.
+        # Try again
+        gather = Gather(
+            num_digits=1,
+            timeout=10,
+            action=f"{backend_url}/demo-rating",
+            method="POST"
+        )
+        response.append(gather)
         
-        Args:
-            start_event_data: Twilio start event data
-            
-        Returns:
-            Stream ID if found, None otherwise
-        """
-        try:
-            return start_event_data['start']['streamSid']
-        except (KeyError, TypeError):
-            return None
-    
-    @staticmethod
-    def extract_media_payload(media_event_data: dict) -> Optional[str]:
-        """
-        Extract audio payload from Twilio media event data.
+        # Final fallback
+        response.say(
+            "Thank you for trying VOX A.I. Goodbye!",
+            voice=TwilioService.TWILIO_VOICE
+        )
+        response.hangup()
         
-        Args:
-            media_event_data: Twilio media event data
-            
-        Returns:
-            Audio payload if found, None otherwise
-        """
-        try:
-            return media_event_data['media']['payload']
-        except (KeyError, TypeError):
-            return None
-    
-    @staticmethod
-    def extract_media_timestamp(media_event_data: dict) -> Optional[int]:
-        """
-        Extract timestamp from Twilio media event data.
-        
-        Args:
-            media_event_data: Twilio media event data
-            
-        Returns:
-            Timestamp if found, None otherwise
-        """
-        try:
-            return int(media_event_data['media']['timestamp'])
-        except (KeyError, TypeError, ValueError):
-            return None
-    
-    @staticmethod
-    def is_media_event(event_data: dict) -> bool:
-        """Check if event data represents a Twilio media event."""
-        return event_data.get('event') == 'media'
-    
-    @staticmethod
-    def is_start_event(event_data: dict) -> bool:
-        """Check if event data represents a Twilio start event."""
-        return event_data.get('event') == 'start'
-    
-    @staticmethod
-    def is_mark_event(event_data: dict) -> bool:
-        """Check if event data represents a Twilio mark event."""
-        return event_data.get('event') == 'mark'
-
-
-class TwilioAudioProcessor:
-    """
-    Handles audio data preparation and conversion for Twilio and OpenAI.
-    
-    - Prepares Twilio audio payloads for OpenAI's Realtime API.
-    - Converts OpenAI audio deltas into Twilio-compatible media messages.
-    
-    This class is typically used internally by the TwilioService or audio pipeline to ensure audio data is in the correct format for each service.
-    """
-    
-    @staticmethod
-    def prepare_audio_for_openai(twilio_payload: str) -> dict:
-        """
-        Prepare Twilio audio payload for OpenAI Realtime API.
-        
-        Args:
-            twilio_payload: Audio payload from Twilio
-            
-        Returns:
-            Dictionary formatted for OpenAI input_audio_buffer.append
-        """
-        return {
-            "type": "input_audio_buffer.append",
-            "audio": twilio_payload
-        }
-    
-    @staticmethod
-    def prepare_audio_for_twilio(openai_delta: str, stream_sid: str) -> dict:
-        """
-        Prepare OpenAI audio delta for Twilio media stream.
-        
-        Args:
-            openai_delta: Audio delta from OpenAI
-            stream_sid: Twilio stream identifier
-            
-        Returns:
-            Dictionary formatted for Twilio media message
-        """
-        converted_payload = TwilioService.convert_openai_audio_to_twilio(openai_delta)
-        return TwilioService.create_media_message(stream_sid, converted_payload)
+        return str(response)
