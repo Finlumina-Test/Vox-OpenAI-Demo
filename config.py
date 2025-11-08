@@ -24,6 +24,17 @@ class Config:
     # Twilio REST credentials (optional; used for programmatic hangup)
     TWILIO_ACCOUNT_SID: str | None = os.getenv('TWILIO_ACCOUNT_SID')
     TWILIO_AUTH_TOKEN: str | None = os.getenv('TWILIO_AUTH_TOKEN')
+    TWILIO_PHONE_NUMBER: str | None = os.getenv('TWILIO_PHONE_NUMBER')
+
+    # 🔥 Email Configuration for Feedback
+    SMTP_SERVER: str = os.getenv('SMTP_SERVER', 'smtp.gmail.com')
+    SMTP_PORT: int = int(os.getenv('SMTP_PORT', '587'))
+    SMTP_USER: str | None = os.getenv('SMTP_USER')
+    SMTP_PASS: str | None = os.getenv('SMTP_PASS')
+    FEEDBACK_EMAIL: str = os.getenv('FEEDBACK_EMAIL', 'faizan@finlumina.com')
+
+    # 🔥 Demo Configuration
+    DEMO_DURATION_SECONDS: int = int(os.getenv('DEMO_DURATION_SECONDS', '60'))  # 1 minute
 
     # AI Assistant Configuration
     SYSTEM_MESSAGE: str = (
@@ -36,6 +47,13 @@ class Config:
         "- Avoid Hindi words. Use words familiar to Pakistani callers.\n"
         "- Warm, polite, and conversational; like a real call center agent.\n"
         "- Short, clear sentences; avoid long lists.\n\n"
+
+        "CRITICAL CLARIFICATION RULES:\n"
+        "- If you hear ANYTHING unclear, gibberish, or bad audio: IMMEDIATELY say 'Sorry, I didn't catch that. Could you repeat?'\n"
+        "- NEVER guess what the customer said - ALWAYS ask for clarification\n"
+        "- If customer mentions a menu item you're unsure about: 'Just to confirm, did you say [item name]?'\n"
+        "- For names, addresses, phone numbers: ALWAYS repeat back and ask 'Is that correct?'\n"
+        "- Better to ask twice than get the order wrong\n\n"
 
         "Behavior:\n"
         "- Greet the caller once, then move quickly to ask relevant questions.\n"
@@ -110,6 +128,10 @@ class Config:
     @classmethod
     def has_twilio_credentials(cls) -> bool:
         return bool(cls.TWILIO_ACCOUNT_SID and cls.TWILIO_AUTH_TOKEN)
+
+    @classmethod
+    def has_smtp_credentials(cls) -> bool:
+        return bool(cls.SMTP_USER and cls.SMTP_PASS)
 
 
 # Initialize and validate
