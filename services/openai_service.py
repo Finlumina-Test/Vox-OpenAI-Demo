@@ -150,7 +150,15 @@ class OpenAISessionManager:
 
                 "instructions": (
                     Config.SYSTEM_MESSAGE
-                    + "\n\nRespond naturally to customer queries about orders, menu items, and delivery."
+                    + "\n\n"
+                    + "CRITICAL CLARIFICATION RULES:\n"
+                    + "- If you hear ANYTHING unclear, gibberish, or bad audio: IMMEDIATELY say 'Sorry, I didn't catch that. Could you repeat?'\n"
+                    + "- NEVER guess what the customer said - ALWAYS ask for clarification\n"
+                    + "- If customer mentions a menu item you're unsure about: 'Just to confirm, did you say [item name]?'\n"
+                    + "- For names, addresses, phone numbers: ALWAYS repeat back and ask 'Is that correct?'\n"
+                    + "- Better to ask twice than get the order wrong\n"
+                    + "\n"
+                    + "Respond naturally to customer queries about orders, menu items, and delivery."
                 ),
 
                 "tools": [
