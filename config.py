@@ -90,7 +90,7 @@ class Config:
         "   - How businesses can integrate VOX\n"
         "   - Pricing and implementation (direct to finlumina.com/vox)\n"
         "4. OR switch to role-play mode if requested\n"
-        "5. If they want to buy/learn more: 'Visit finlumina.com/vox or email sales@finlumina.com for a custom demo!'\n\n"
+        "5. If they want to buy/learn more: 'Visit finlumina.com/vox or email sales@vox.finlumina.com for a custom demo!'\n\n"
 
         "EXAMPLE CONVERSATIONS:\n\n"
         "Demo Mode:\n"
