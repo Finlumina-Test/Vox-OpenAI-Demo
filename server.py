@@ -1,18 +1,22 @@
-# server.py - FINAL WORKING VERSION
-# Just copy this entire file and replace your server.py
+# server.py - PART 1: IMPORTS AND HELPER FUNCTIONS
+# Replace lines 1-100 of your server.py with this
 
 import os
 import json
 import time
 import base64
 import asyncio
+import secrets
+import smtplib
 from typing import Set, Optional, Dict, Any
+from email.mime.text import MIMEText
+from datetime import datetime
 
 from fastapi import FastAPI, WebSocket, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from fastapi.websockets import WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from services.order_extraction_service import OrderExtractionService
+from twilio.twiml.voice_response import VoiceResponse
 
 from config import Config
 from services import (
@@ -21,11 +25,17 @@ from services import (
     OpenAIService,
     AudioService,
 )
+from services.order_extraction_service import OrderExtractionService
 from services.transcription_service import TranscriptionService
 from services.log_utils import Log
 from services.silence_detection import SilenceDetector
 
 
+# ===== DEMO SESSION TRACKING =====
+demo_sessions = {}
+demo_pending_start = {}  # Sessions waiting for key press
+
+# ===== DASHBOARD CLIENTS =====
 class DashboardClient:
     def __init__(self, websocket: WebSocket, call_sid: Optional[str] = None):
         self.websocket = websocket
@@ -35,6 +45,7 @@ active_calls: Dict[str, Dict[str, Any]] = {}
 dashboard_clients: Set[DashboardClient] = set()
 
 
+# ===== BROADCAST HELPER =====
 async def _do_broadcast(payload: Dict[str, Any], call_sid: Optional[str] = None):
     try:
         if "timestamp" not in payload or payload["timestamp"] is None:
@@ -77,6 +88,50 @@ def broadcast_to_dashboards_nonblocking(payload: Dict[str, Any], call_sid: Optio
         Log.error(f"[Broadcast] Failed to create broadcast task: {e}")
 
 
+# ===== EMAIL HELPER =====
+def send_rating_email(rating: int, call_sid: str, phone: str, session_id: str = None):
+    """Send rating notification email."""
+    try:
+        if not Config.has_smtp_credentials():
+            Log.warning("📧 SMTP not configured - skipping email")
+            return
+        
+        # Create email
+        subject = f"VOX Demo Rating: {rating}/5 {'⭐' * rating}"
+        
+        body = f"""
+New VOX AI Demo Feedback Received!
+
+Rating: {rating}/5 {'⭐' * rating}
+Phone: {phone}
+Call SID: {call_sid}
+Session ID: {session_id or 'N/A'}
+Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+
+Dashboard: https://vox.finlumina.com/demo/{session_id or 'N/A'}
+
+---
+Finlumina VOX Demo System
+"""
+        
+        msg = MIMEText(body)
+        msg['Subject'] = subject
+        msg['From'] = Config.SMTP_USER
+        msg['To'] = Config.FEEDBACK_EMAIL
+        
+        # Send email
+        with smtplib.SMTP(Config.SMTP_SERVER, Config.SMTP_PORT) as server:
+            server.starttls()
+            server.login(Config.SMTP_USER, Config.SMTP_PASS)
+            server.send_message(msg)
+        
+        Log.info(f"📧 Rating email sent: {rating}/5 to {Config.FEEDBACK_EMAIL}")
+        
+    except Exception as e:
+        Log.error(f"📧 Failed to send rating email: {e}")
+
+
+# ===== FASTAPI APP =====
 app = FastAPI()
 
 app.add_middleware(
@@ -88,6 +143,7 @@ app.add_middleware(
 )
 
 
+# ===== ENDPOINTS =====
 @app.get("/", response_class=JSONResponse)
 async def index_page():
     return {"message": "Twilio Media Stream Server is running!"}
@@ -95,8 +151,128 @@ async def index_page():
 
 @app.api_route("/incoming-call", methods=["GET", "POST"])
 async def handle_incoming_call(request: Request):
-    return TwilioService.create_incoming_call_response(request)
+    """Handle incoming call - generate session and speak URL via TwiML."""
+    try:
+        form_data = await request.form()
+        call_sid = form_data.get('CallSid')
+        from_phone = form_data.get('From')
+        
+        # Generate session ID (short and easy)
+        session_id = secrets.token_urlsafe(6)  # e.g., "x7k9mN"
+        
+        # Store session (waiting for key press to start)
+        demo_pending_start[session_id] = {
+            'call_sid': call_sid,
+            'phone': from_phone,
+            'created_at': time.time()
+        }
+        
+        Log.info(f"📞 Incoming call: {call_sid}")
+        Log.info(f"🎯 Session ID: {session_id}")
+        Log.info(f"📊 Dashboard: https://vox.finlumina.com/demo/{session_id}")
+        
+        # Return TwiML that speaks URL and waits for key press
+        backend_url = f"https://{request.url.hostname}"
+        twiml = TwilioService.create_demo_intro_twiml(session_id, backend_url)
+        
+        return Response(content=twiml, media_type="application/xml")
+        
+    except Exception as e:
+        Log.error(f"Error handling incoming call: {e}")
+        # Fallback
+        response = VoiceResponse()
+        response.say("Error starting demo. Please try again.", voice=TwilioService.TWILIO_VOICE)
+        return Response(content=str(response), media_type="application/xml")
 
+
+@app.api_route("/demo-start", methods=["POST", "GET"])
+async def handle_demo_start(request: Request):
+    """Handle key press to start demo."""
+    try:
+        # Get parameters
+        if request.method == "POST":
+            form_data = await request.form()
+            call_sid = form_data.get('CallSid')
+            digits = form_data.get('Digits', 'auto')
+        else:
+            call_sid = request.query_params.get('CallSid')
+            digits = request.query_params.get('auto', 'auto')
+        
+        Log.info(f"🎬 Demo start requested for {call_sid} (pressed: {digits})")
+        
+        # Find session for this call
+        session_id = None
+        for sid, data in demo_pending_start.items():
+            if data['call_sid'] == call_sid:
+                session_id = sid
+                break
+        
+        if session_id:
+            # Move from pending to active
+            demo_sessions[session_id] = demo_pending_start.pop(session_id)
+            demo_sessions[session_id]['started_at'] = time.time()
+            demo_sessions[session_id]['demo_active'] = True
+            Log.info(f"✅ Demo activated for session: {session_id}")
+        
+        # Return TwiML to start media stream
+        backend_host = request.url.hostname
+        twiml = TwilioService.create_demo_start_twiml(backend_host)
+        
+        return Response(content=twiml, media_type="application/xml")
+        
+    except Exception as e:
+        Log.error(f"Error starting demo: {e}")
+        backend_host = request.url.hostname
+        twiml = TwilioService.create_demo_start_twiml(backend_host)
+        return Response(content=twiml, media_type="application/xml")
+
+
+@app.api_route("/demo-rating", methods=["POST"])
+async def demo_rating(request: Request):
+    """Handle feedback rating from keypad."""
+    try:
+        form_data = await request.form()
+        digits = form_data.get('Digits', '')
+        call_sid = form_data.get('CallSid', '')
+        from_phone = form_data.get('From', 'Unknown')
+        
+        Log.info(f"📊 Received rating: {digits} from {call_sid}")
+        
+        # Validate rating
+        try:
+            rating = int(digits)
+            if rating < 1 or rating > 5:
+                backend_url = f"https://{request.url.hostname}"
+                twiml = TwilioService.create_invalid_rating_twiml(backend_url)
+                return Response(content=twiml, media_type="application/xml")
+        except:
+            backend_url = f"https://{request.url.hostname}"
+            twiml = TwilioService.create_invalid_rating_twiml(backend_url)
+            return Response(content=twiml, media_type="application/xml")
+        
+        # Find session for this call
+        session_id = None
+        for sid, data in demo_sessions.items():
+            if data.get('call_sid') == call_sid:
+                session_id = sid
+                break
+        
+        # Send email with rating
+        send_rating_email(rating, call_sid, from_phone, session_id)
+        
+        # Thank user and end call
+        twiml = TwilioService.create_rating_response_twiml(rating)
+        return Response(content=twiml, media_type="application/xml")
+        
+    except Exception as e:
+        Log.error(f"Rating handler error: {e}")
+        response = VoiceResponse()
+        response.say("Thank you. Goodbye!", voice=TwilioService.TWILIO_VOICE)
+        response.hangup()
+        return Response(content=str(response), media_type="application/xml")
+
+# server.py - PART 2: REMAINING ENDPOINTS AND WEBSOCKETS
+# This continues from PART 1
 
 @app.websocket("/dashboard-stream")
 async def dashboard_stream(websocket: WebSocket):
@@ -235,7 +411,6 @@ async def handle_takeover(request: Request):
         if action == "enable":
             openai_service.enable_human_takeover()
             
-            # Try to cancel (ignore if no response active - this is normal)
             try:
                 await connection_manager.send_to_openai({
                     "type": "response.cancel"
@@ -314,7 +489,6 @@ async def handle_end_call(request: Request):
         
         if call_sid not in active_calls:
             Log.warning(f"[EndCall] Call {call_sid} not in active_calls (might have ended)")
-            # Still try to end it via Twilio
         
         openai_service = active_calls.get(call_sid, {}).get("openai_service")
         
@@ -392,12 +566,56 @@ async def handle_media_stream(websocket: WebSocket):
     
     current_call_sid: Optional[str] = None
     
+    # 🔥 DEMO TRACKING
+    demo_session_id: Optional[str] = None
+    demo_start_time: Optional[float] = None
+    demo_ended = False
+    
     ai_audio_queue = asyncio.Queue()
     ai_stream_task = None
     shutdown_flag = False
     
     ai_currently_speaking = False
     last_speech_started_time = 0
+
+    # 🔥 DEMO TIMER
+    async def check_demo_timer():
+        """Check if 60 seconds elapsed since OpenAI started."""
+        nonlocal demo_ended
+        
+        if not demo_start_time:
+            return
+        
+        while not shutdown_flag and not demo_ended:
+            elapsed = time.time() - demo_start_time
+            
+            if elapsed >= Config.DEMO_DURATION_SECONDS:
+                demo_ended = True
+                Log.info("⏱️ Demo time expired - ending OpenAI, starting feedback")
+                
+                # Close OpenAI connection
+                try:
+                    await connection_manager.close_openai_connection()
+                except Exception as e:
+                    Log.error(f"Failed to close OpenAI: {e}")
+                
+                # Redirect to feedback TwiML
+                if current_call_sid and Config.has_twilio_credentials():
+                    try:
+                        from twilio.rest import Client
+                        client = Client(Config.TWILIO_ACCOUNT_SID, Config.TWILIO_AUTH_TOKEN)
+                        
+                        backend_url = os.getenv('BACKEND_URL', f"https://{websocket.url.hostname}")
+                        feedback_twiml = TwilioService.create_feedback_twiml(backend_url)
+                        
+                        client.calls(current_call_sid).update(twiml=feedback_twiml)
+                        Log.info("✅ Redirected to feedback flow")
+                    except Exception as e:
+                        Log.error(f"Failed to redirect to feedback: {e}")
+                
+                break
+            
+            await asyncio.sleep(1)
 
     async def ai_audio_streamer():
         nonlocal ai_currently_speaking
@@ -489,7 +707,6 @@ async def handle_media_stream(websocket: WebSocket):
                 media = data.get("media") or {}
                 payload_b64 = media.get("payload")
                 if payload_b64:
-                    # Send ALL audio (silence detection disabled for testing)
                     should_send_to_dashboard = True
                     
                     if openai_service.is_human_in_control():
@@ -540,7 +757,6 @@ async def handle_media_stream(websocket: WebSocket):
                 delta = audio_data.get("delta")
                 
                 if delta:
-                    # Send ALL AI audio (silence detection disabled)
                     should_send_to_dashboard = True
                     
                     if getattr(connection_manager.state, "stream_sid", None):
@@ -636,9 +852,26 @@ async def handle_media_stream(websocket: WebSocket):
                     Log.error(f"Session renewal failed: {e}")
 
         async def on_start_cb(stream_sid: str):
-            nonlocal current_call_sid, ai_stream_task
+            nonlocal current_call_sid, ai_stream_task, demo_session_id, demo_start_time
+            
             current_call_sid = getattr(connection_manager.state, 'call_sid', stream_sid)
             Log.event("Twilio Start", {"streamSid": stream_sid, "callSid": current_call_sid})
+            
+            # 🔥 FIND DEMO SESSION
+            for sid, data in demo_sessions.items():
+                if data.get('call_sid') == current_call_sid:
+                    demo_session_id = sid
+                    demo_start_time = time.time()
+                    Log.info(f"🎯 Found demo session: {demo_session_id}")
+                    Log.info(f"⏱️ Demo timer started - expires in {Config.DEMO_DURATION_SECONDS}s")
+                    break
+            
+            if not demo_session_id:
+                Log.warning("⚠️ No demo session found for this call")
+            
+            # 🔥 START TIMER
+            if demo_session_id and demo_start_time:
+                asyncio.create_task(check_demo_timer())
             
             caller_silence_detector.reset()
             ai_silence_detector.reset()
