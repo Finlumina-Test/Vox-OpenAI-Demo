@@ -665,6 +665,9 @@ async def handle_media_stream(websocket: WebSocket):
     
     ai_currently_speaking = False
     last_speech_started_time = 0
+    
+    # 🔥 NEW: Event to wait for Twilio connection
+    twilio_connected = asyncio.Event()
 
     # 🔥 DEMO TIMER
     async def check_demo_timer():
@@ -929,7 +932,10 @@ async def handle_media_stream(websocket: WebSocket):
         async def handle_other_openai_event(response: dict):
             event_type = response.get('type', '')
             
-            # 🔥 NEW: Log important OpenAI events
+            # 🔥 LOG EVERY EVENT FROM OPENAI
+            Log.info(f"[OpenAI Event] {event_type}")
+            
+            # Log important OpenAI events
             if event_type == 'session.created':
                 Log.info("✅ [OpenAI] Session created successfully")
             elif event_type == 'session.updated':
@@ -1038,19 +1044,33 @@ async def handle_media_stream(websocket: WebSocket):
                 broadcast_to_dashboards_nonblocking(payload, current_call_sid)
             
             order_extractor.set_update_callback(send_order_update)
+            
+            # 🔥 CRITICAL: Signal that Twilio is connected
+            twilio_connected.set()
 
-            async def on_mark_cb():
-                try:
-                    audio_service.handle_mark_event()
-                except Exception:
-                    pass
+        async def on_mark_cb():
+            try:
+                audio_service.handle_mark_event()
+            except Exception:
+                pass
 
-            Log.info("🚀 Starting main event loops (Twilio + OpenAI + Session Renewal)...")
-            await asyncio.gather(
-                connection_manager.receive_from_twilio(handle_media_event, on_start_cb, on_mark_cb),
-                openai_receiver(),
-                renew_openai_session(),
-            )
+        # 🔥 CRITICAL FIX: Start Twilio receiver FIRST
+        Log.info("🚀 Starting Twilio receiver...")
+        twilio_task = asyncio.create_task(
+            connection_manager.receive_from_twilio(handle_media_event, on_start_cb, on_mark_cb)
+        )
+        
+        # Wait for Twilio to actually connect
+        Log.info("⏳ Waiting for Twilio to connect...")
+        await twilio_connected.wait()
+        Log.info("✅ Twilio connected! Starting OpenAI receiver and session renewal...")
+        
+        # NOW start the other loops
+        await asyncio.gather(
+            twilio_task,  # Already running
+            openai_receiver(),
+            renew_openai_session(),
+        )
 
     except Exception as e:
         Log.error(f"❌ CRITICAL ERROR in media stream handler: {e}")
