@@ -271,8 +271,6 @@ async def demo_rating(request: Request):
         response.hangup()
         return Response(content=str(response), media_type="application/xml")
 
-# server.py - PART 2: REMAINING ENDPOINTS AND WEBSOCKETS
-# This continues from PART 1
 
 @app.websocket("/dashboard-stream")
 async def dashboard_stream(websocket: WebSocket):
@@ -563,7 +561,6 @@ async def handle_end_call(request: Request):
     except Exception as e:
         Log.error(f"[EndCall] Error: {e}")
         return JSONResponse({"error": str(e)}, status_code=500)
-
 
 @app.websocket("/media-stream")
 async def handle_media_stream(websocket: WebSocket):
@@ -866,70 +863,70 @@ async def handle_media_stream(websocket: WebSocket):
                 except Exception as e:
                     Log.error(f"Session renewal failed: {e}")
 
-    async def on_start_cb(stream_sid: str):
-        nonlocal current_call_sid, ai_stream_task, demo_session_id, demo_start_time, restaurant_id
-        
-        current_call_sid = getattr(connection_manager.state, 'call_sid', stream_sid)
-        Log.event("Twilio Start", {"streamSid": stream_sid, "callSid": current_call_sid})
-        
-        # 🔥 MODIFIED: Find demo session AND restaurant_id
-        for sid, data in demo_sessions.items():
-            if data.get('call_sid') == current_call_sid:
-                demo_session_id = sid
-                demo_start_time = time.time()
-                restaurant_id = data.get('restaurant_id', 'default')  # 🔥 ADDED
-                Log.info(f"🎯 Found demo session: {demo_session_id}")
-                Log.info(f"🏪 Restaurant ID: {restaurant_id}")
-                Log.info(f"⏱️ Demo timer started - expires in {Config.DEMO_DURATION_SECONDS}s")
-                break
-        
-        if not demo_session_id:
-            Log.warning("⚠️ No demo session found for this call")
-        
-        if demo_session_id and demo_start_time:
-            asyncio.create_task(check_demo_timer())
-        
-        caller_silence_detector.reset()
-        ai_silence_detector.reset()
-        
-        if ai_stream_task is None or ai_stream_task.done():
-            ai_stream_task = asyncio.create_task(ai_audio_streamer())
-            Log.info("[AI Streamer] Task started")
-        
-        # 🔥 MODIFIED: Store restaurant_id with call
-        active_calls[current_call_sid] = {
-            "restaurant_id": restaurant_id,  # 🔥 ADDED
-            "openai_service": openai_service,
-            "connection_manager": connection_manager,
-            "audio_service": audio_service,
-            "transcription_service": transcription_service,
-            "order_extractor": order_extractor,
-            "human_audio_ws": None
-        }
-        Log.info(f"[ActiveCalls] Registered call {current_call_sid} for restaurant {restaurant_id}")
-
-        async def send_order_update(order_data: Dict[str, Any]):
-            payload = {
-                "messageType": "orderUpdate",
-                "orderData": order_data,
-                "timestamp": int(time.time() * 1000),
-                "callSid": current_call_sid,
+        async def on_start_cb(stream_sid: str):
+            nonlocal current_call_sid, ai_stream_task, demo_session_id, demo_start_time, restaurant_id
+            
+            current_call_sid = getattr(connection_manager.state, 'call_sid', stream_sid)
+            Log.event("Twilio Start", {"streamSid": stream_sid, "callSid": current_call_sid})
+            
+            # 🔥 MODIFIED: Find demo session AND restaurant_id
+            for sid, data in demo_sessions.items():
+                if data.get('call_sid') == current_call_sid:
+                    demo_session_id = sid
+                    demo_start_time = time.time()
+                    restaurant_id = data.get('restaurant_id', 'default')  # 🔥 ADDED
+                    Log.info(f"🎯 Found demo session: {demo_session_id}")
+                    Log.info(f"🏪 Restaurant ID: {restaurant_id}")
+                    Log.info(f"⏱️ Demo timer started - expires in {Config.DEMO_DURATION_SECONDS}s")
+                    break
+            
+            if not demo_session_id:
+                Log.warning("⚠️ No demo session found for this call")
+            
+            if demo_session_id and demo_start_time:
+                asyncio.create_task(check_demo_timer())
+            
+            caller_silence_detector.reset()
+            ai_silence_detector.reset()
+            
+            if ai_stream_task is None or ai_stream_task.done():
+                ai_stream_task = asyncio.create_task(ai_audio_streamer())
+                Log.info("[AI Streamer] Task started")
+            
+            # 🔥 MODIFIED: Store restaurant_id with call
+            active_calls[current_call_sid] = {
+                "restaurant_id": restaurant_id,  # 🔥 ADDED
+                "openai_service": openai_service,
+                "connection_manager": connection_manager,
+                "audio_service": audio_service,
+                "transcription_service": transcription_service,
+                "order_extractor": order_extractor,
+                "human_audio_ws": None
             }
-            broadcast_to_dashboards_nonblocking(payload, current_call_sid)
-        
-        order_extractor.set_update_callback(send_order_update)
+            Log.info(f"[ActiveCalls] Registered call {current_call_sid} for restaurant {restaurant_id}")
 
-        async def on_mark_cb():
-            try:
-                audio_service.handle_mark_event()
-            except Exception:
-                pass
+            async def send_order_update(order_data: Dict[str, Any]):
+                payload = {
+                    "messageType": "orderUpdate",
+                    "orderData": order_data,
+                    "timestamp": int(time.time() * 1000),
+                    "callSid": current_call_sid,
+                }
+                broadcast_to_dashboards_nonblocking(payload, current_call_sid)
+            
+            order_extractor.set_update_callback(send_order_update)
 
-        await asyncio.gather(
-            connection_manager.receive_from_twilio(handle_media_event, on_start_cb, on_mark_cb),
-            openai_receiver(),
-            renew_openai_session(),
-        )
+            async def on_mark_cb():
+                try:
+                    audio_service.handle_mark_event()
+                except Exception:
+                    pass
+
+            await asyncio.gather(
+                connection_manager.receive_from_twilio(handle_media_event, on_start_cb, on_mark_cb),
+                openai_receiver(),
+                renew_openai_session(),
+            )
 
     except Exception as e:
         Log.error(f"Error in media stream handler: {e}")
