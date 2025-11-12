@@ -330,8 +330,6 @@ class OpenAIService:
         self.human_audio_callback: Optional[callable] = None
 
     # --- SESSION & GREETING ---
-# In services/openai_service.py
-
     async def initialize_session(self, connection_manager) -> None:
         Log.info("📤 Creating session update message...")
         session_update = self.session_manager.create_session_update()
@@ -364,12 +362,12 @@ class OpenAIService:
         Log.json("Response trigger", response_trigger)
         await connection_manager.send_to_openai(response_trigger)
         Log.info("✅ Response trigger sent - AI should start speaking now")
-    
-        # --- HUMAN TAKEOVER ---
-        def enable_human_takeover(self):
-            """Enable human takeover mode - AI stops responding."""
-            self._human_takeover_active = True
-            Log.info("[Takeover] Human takeover ENABLED - AI will not respond")
+
+    # --- HUMAN TAKEOVER ---
+    def enable_human_takeover(self):
+        """Enable human takeover mode - AI stops responding."""
+        self._human_takeover_active = True
+        Log.info("[Takeover] Human takeover ENABLED - AI will not respond")
     
     def disable_human_takeover(self):
         """Disable human takeover mode - AI resumes."""
