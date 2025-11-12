@@ -33,7 +33,7 @@ from services.silence_detection import SilenceDetector
 
 # ===== DEMO SESSION TRACKING =====
 demo_sessions = {}
-demo_pending_start = {}  # Sessions waiting for key press
+demo_pending_start = {} # Sessions waiting for key press
 
 # ===== DASHBOARD CLIENTS =====
 class DashboardClient:
@@ -157,17 +157,21 @@ async def handle_incoming_call(request: Request):
         call_sid = form_data.get('CallSid')
         from_phone = form_data.get('From')
         
-        # Generate session ID (short and easy)
-        session_id = secrets.token_urlsafe(6)  # e.g., "x7k9mN"
+        # 🔥 NEW: Extract restaurant_id from query params or header
+        restaurant_id = request.query_params.get('restaurant_id') or request.headers.get('X-Restaurant-ID', 'default')
         
-        # Store session (waiting for key press to start)
+        # Generate session ID (short and easy)
+        session_id = secrets.token_urlsafe(6)
+        
+        # 🔥 MODIFIED: Store restaurant_id with session
         demo_pending_start[session_id] = {
             'call_sid': call_sid,
             'phone': from_phone,
-            'created_at': time.time()
+            'created_at': time.time(),
+            'restaurant_id': restaurant_id  # 🔥 ADDED
         }
         
-        Log.info(f"📞 Incoming call: {call_sid}")
+        Log.info(f"📞 Incoming call: {call_sid} for restaurant: {restaurant_id}")
         Log.info(f"🎯 Session ID: {session_id}")
         Log.info(f"📊 Dashboard: https://vox.finlumina.com/demo/{session_id}")
         
@@ -179,17 +183,16 @@ async def handle_incoming_call(request: Request):
         
     except Exception as e:
         Log.error(f"Error handling incoming call: {e}")
-        # Fallback
         response = VoiceResponse()
         response.say("Error starting demo. Please try again.", voice=TwilioService.TWILIO_VOICE)
         return Response(content=str(response), media_type="application/xml")
+
 
 
 @app.api_route("/demo-start", methods=["POST", "GET"])
 async def handle_demo_start(request: Request):
     """Handle key press to start demo."""
     try:
-        # Get parameters
         if request.method == "POST":
             form_data = await request.form()
             call_sid = form_data.get('CallSid')
@@ -200,7 +203,6 @@ async def handle_demo_start(request: Request):
         
         Log.info(f"🎬 Demo start requested for {call_sid} (pressed: {digits})")
         
-        # Find session for this call
         session_id = None
         for sid, data in demo_pending_start.items():
             if data['call_sid'] == call_sid:
@@ -208,13 +210,12 @@ async def handle_demo_start(request: Request):
                 break
         
         if session_id:
-            # Move from pending to active
+            # Move from pending to active, preserving restaurant_id
             demo_sessions[session_id] = demo_pending_start.pop(session_id)
             demo_sessions[session_id]['started_at'] = time.time()
             demo_sessions[session_id]['demo_active'] = True
-            Log.info(f"✅ Demo activated for session: {session_id}")
+            Log.info(f"✅ Demo activated for session: {session_id} (restaurant: {demo_sessions[session_id].get('restaurant_id')})")
         
-        # Return TwiML to start media stream
         backend_host = request.url.hostname
         twiml = TwilioService.create_demo_start_twiml(backend_host)
         
@@ -225,7 +226,6 @@ async def handle_demo_start(request: Request):
         backend_host = request.url.hostname
         twiml = TwilioService.create_demo_start_twiml(backend_host)
         return Response(content=twiml, media_type="application/xml")
-
 
 @app.api_route("/demo-rating", methods=["POST"])
 async def demo_rating(request: Request):
@@ -392,18 +392,27 @@ async def handle_takeover(request: Request):
         data = await request.json()
         call_sid = data.get("callSid")
         action = data.get("action")
+        restaurant_id = data.get("restaurantId")  # 🔥 ADDED
         
-        Log.info(f"[Takeover] Request: {action} for call {call_sid}")
+        Log.info(f"[Takeover] Request: {action} for call {call_sid} (restaurant: {restaurant_id})")
         
         if not call_sid or action not in ["enable", "disable"]:
             return JSONResponse({"error": "Invalid request"}, status_code=400)
         
         if call_sid not in active_calls:
-            Log.error(f"[Takeover] Call {call_sid} not found")
+            Log.error(f"[Takeover] Call {call_sid} not found in active_calls")
+            Log.error(f"[Takeover] Available calls: {list(active_calls.keys())}")
             return JSONResponse({"error": "Call not found"}, status_code=404)
         
-        openai_service = active_calls[call_sid].get("openai_service")
-        connection_manager = active_calls[call_sid].get("connection_manager")
+        call_data = active_calls[call_sid]
+        
+        # 🔥 NEW: Validate restaurant_id matches
+        if restaurant_id and call_data.get("restaurant_id") != restaurant_id:
+            Log.error(f"[Takeover] Restaurant ID mismatch: expected {call_data.get('restaurant_id')}, got {restaurant_id}")
+            return JSONResponse({"error": "Restaurant ID mismatch"}, status_code=403)
+        
+        openai_service = call_data.get("openai_service")
+        connection_manager = call_data.get("connection_manager")
         
         if not openai_service or not connection_manager:
             return JSONResponse({"error": "Service not available"}, status_code=500)
@@ -474,26 +483,32 @@ async def handle_takeover(request: Request):
     except Exception as e:
         Log.error(f"[Takeover] Error: {e}")
         return JSONResponse({"error": str(e)}, status_code=500)
-
+        
 
 @app.api_route("/end-call", methods=["POST"])
 async def handle_end_call(request: Request):
     try:
         data = await request.json()
         call_sid = data.get("callSid")
+        restaurant_id = data.get("restaurantId")  # 🔥 ADDED
         
-        Log.info(f"[EndCall] Request to end call {call_sid}")
+        Log.info(f"[EndCall] Request to end call {call_sid} (restaurant: {restaurant_id})")
         
         if not call_sid:
             return JSONResponse({"error": "Invalid request"}, status_code=400)
         
         if call_sid not in active_calls:
             Log.warning(f"[EndCall] Call {call_sid} not in active_calls (might have ended)")
-        
-        openai_service = active_calls.get(call_sid, {}).get("openai_service")
-        
-        if openai_service and openai_service.is_human_in_control():
-            openai_service.disable_human_takeover()
+        else:
+            # 🔥 NEW: Validate restaurant_id if call exists
+            call_data = active_calls[call_sid]
+            if restaurant_id and call_data.get("restaurant_id") != restaurant_id:
+                Log.error(f"[EndCall] Restaurant ID mismatch: expected {call_data.get('restaurant_id')}, got {restaurant_id}")
+                return JSONResponse({"error": "Restaurant ID mismatch"}, status_code=403)
+            
+            openai_service = call_data.get("openai_service")
+            if openai_service and openai_service.is_human_in_control():
+                openai_service.disable_human_takeover()
         
         if Config.has_twilio_credentials():
             try:
@@ -565,8 +580,8 @@ async def handle_media_stream(websocket: WebSocket):
     ai_silence_detector = SilenceDetector()
     
     current_call_sid: Optional[str] = None
+    restaurant_id: Optional[str] = None  # 🔥 ADDED
     
-    # 🔥 DEMO TRACKING
     demo_session_id: Optional[str] = None
     demo_start_time: Optional[float] = None
     demo_ended = False
@@ -851,55 +866,58 @@ async def handle_media_stream(websocket: WebSocket):
                 except Exception as e:
                     Log.error(f"Session renewal failed: {e}")
 
-        async def on_start_cb(stream_sid: str):
-            nonlocal current_call_sid, ai_stream_task, demo_session_id, demo_start_time
-            
-            current_call_sid = getattr(connection_manager.state, 'call_sid', stream_sid)
-            Log.event("Twilio Start", {"streamSid": stream_sid, "callSid": current_call_sid})
-            
-            # 🔥 FIND DEMO SESSION
-            for sid, data in demo_sessions.items():
-                if data.get('call_sid') == current_call_sid:
-                    demo_session_id = sid
-                    demo_start_time = time.time()
-                    Log.info(f"🎯 Found demo session: {demo_session_id}")
-                    Log.info(f"⏱️ Demo timer started - expires in {Config.DEMO_DURATION_SECONDS}s")
-                    break
-            
-            if not demo_session_id:
-                Log.warning("⚠️ No demo session found for this call")
-            
-            # 🔥 START TIMER
-            if demo_session_id and demo_start_time:
-                asyncio.create_task(check_demo_timer())
-            
-            caller_silence_detector.reset()
-            ai_silence_detector.reset()
-            
-            if ai_stream_task is None or ai_stream_task.done():
-                ai_stream_task = asyncio.create_task(ai_audio_streamer())
-                Log.info("[AI Streamer] Task started")
-            
-            active_calls[current_call_sid] = {
-                "openai_service": openai_service,
-                "connection_manager": connection_manager,
-                "audio_service": audio_service,
-                "transcription_service": transcription_service,
-                "order_extractor": order_extractor,
-                "human_audio_ws": None
-            }
-            Log.info(f"[ActiveCalls] Registered call {current_call_sid}")
+    async def on_start_cb(stream_sid: str):
+        nonlocal current_call_sid, ai_stream_task, demo_session_id, demo_start_time, restaurant_id
+        
+        current_call_sid = getattr(connection_manager.state, 'call_sid', stream_sid)
+        Log.event("Twilio Start", {"streamSid": stream_sid, "callSid": current_call_sid})
+        
+        # 🔥 MODIFIED: Find demo session AND restaurant_id
+        for sid, data in demo_sessions.items():
+            if data.get('call_sid') == current_call_sid:
+                demo_session_id = sid
+                demo_start_time = time.time()
+                restaurant_id = data.get('restaurant_id', 'default')  # 🔥 ADDED
+                Log.info(f"🎯 Found demo session: {demo_session_id}")
+                Log.info(f"🏪 Restaurant ID: {restaurant_id}")
+                Log.info(f"⏱️ Demo timer started - expires in {Config.DEMO_DURATION_SECONDS}s")
+                break
+        
+        if not demo_session_id:
+            Log.warning("⚠️ No demo session found for this call")
+        
+        if demo_session_id and demo_start_time:
+            asyncio.create_task(check_demo_timer())
+        
+        caller_silence_detector.reset()
+        ai_silence_detector.reset()
+        
+        if ai_stream_task is None or ai_stream_task.done():
+            ai_stream_task = asyncio.create_task(ai_audio_streamer())
+            Log.info("[AI Streamer] Task started")
+        
+        # 🔥 MODIFIED: Store restaurant_id with call
+        active_calls[current_call_sid] = {
+            "restaurant_id": restaurant_id,  # 🔥 ADDED
+            "openai_service": openai_service,
+            "connection_manager": connection_manager,
+            "audio_service": audio_service,
+            "transcription_service": transcription_service,
+            "order_extractor": order_extractor,
+            "human_audio_ws": None
+        }
+        Log.info(f"[ActiveCalls] Registered call {current_call_sid} for restaurant {restaurant_id}")
 
-            async def send_order_update(order_data: Dict[str, Any]):
-                payload = {
-                    "messageType": "orderUpdate",
-                    "orderData": order_data,
-                    "timestamp": int(time.time() * 1000),
-                    "callSid": current_call_sid,
-                }
-                broadcast_to_dashboards_nonblocking(payload, current_call_sid)
-            
-            order_extractor.set_update_callback(send_order_update)
+        async def send_order_update(order_data: Dict[str, Any]):
+            payload = {
+                "messageType": "orderUpdate",
+                "orderData": order_data,
+                "timestamp": int(time.time() * 1000),
+                "callSid": current_call_sid,
+            }
+            broadcast_to_dashboards_nonblocking(payload, current_call_sid)
+        
+        order_extractor.set_update_callback(send_order_update)
 
         async def on_mark_cb():
             try:
