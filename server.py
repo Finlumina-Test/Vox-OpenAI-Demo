@@ -271,12 +271,56 @@ async def demo_rating(request: Request):
         response.hangup()
         return Response(content=str(response), media_type="application/xml")
 
+@app.get("/api/validate-session/{session_id}")
+async def validate_session(session_id: str):
+    """Validate if a demo session exists and is active."""
+    try:
+        Log.info(f"🔍 Validating session: {session_id}")
+        
+        # Check if session exists in either pending or active sessions
+        if session_id in demo_pending_start:
+            session_data = demo_pending_start[session_id]
+            return JSONResponse({
+                "valid": True,
+                "status": "pending",
+                "sessionId": session_id,
+                "callSid": session_data.get('call_sid'),
+                "restaurantId": session_data.get('restaurant_id', 'demo'),
+                "createdAt": session_data.get('created_at')
+            })
+        
+        if session_id in demo_sessions:
+            session_data = demo_sessions[session_id]
+            return JSONResponse({
+                "valid": True,
+                "status": "active",
+                "sessionId": session_id,
+                "callSid": session_data.get('call_sid'),
+                "restaurantId": session_data.get('restaurant_id', 'demo'),
+                "startedAt": session_data.get('started_at')
+            })
+        
+        # Session not found
+        Log.warning(f"⚠️ Session not found: {session_id}")
+        return JSONResponse({
+            "valid": False,
+            "error": "Session not found or expired"
+        }, status_code=404)
+        
+    except Exception as e:
+        Log.error(f"❌ Session validation error: {e}")
+        return JSONResponse({
+            "valid": False,
+            "error": "Validation failed"
+        }, status_code=500)
+
 
 @app.websocket("/dashboard-stream")
 async def dashboard_stream(websocket: WebSocket):
     await websocket.accept()
     DASHBOARD_TOKEN = os.getenv("DASHBOARD_TOKEN")
     client_call_id: Optional[str] = None
+    client_session_id: Optional[str] = None  # 🔥 NEW
 
     if DASHBOARD_TOKEN:
         provided = websocket.query_params.get("token") or websocket.headers.get("x-dashboard-token")
@@ -288,7 +332,26 @@ async def dashboard_stream(websocket: WebSocket):
         msg = await asyncio.wait_for(websocket.receive_text(), timeout=5)
         data = json.loads(msg)
         client_call_id = data.get("callId")
-        Log.info(f"Dashboard client subscribed to call: {client_call_id or 'ALL'}")
+        client_session_id = data.get("sessionId")  # 🔥 NEW
+        
+        # 🔥 NEW: If sessionId provided, resolve to callSid
+        if client_session_id and not client_call_id:
+            # Check in active sessions
+            if client_session_id in demo_sessions:
+                client_call_id = demo_sessions[client_session_id].get('call_sid')
+                Log.info(f"📡 Dashboard subscribed to session {client_session_id} → call {client_call_id}")
+            # Check in pending sessions
+            elif client_session_id in demo_pending_start:
+                client_call_id = demo_pending_start[client_session_id].get('call_sid')
+                Log.info(f"📡 Dashboard subscribed to pending session {client_session_id} → call {client_call_id}")
+            else:
+                Log.warning(f"⚠️ Session {client_session_id} not found")
+        
+        if client_call_id:
+            Log.info(f"Dashboard client subscribed to call: {client_call_id}")
+        else:
+            Log.info("Dashboard client subscribed to ALL calls")
+            
     except (asyncio.TimeoutError, json.JSONDecodeError, KeyError):
         Log.info("Dashboard client subscribed to ALL calls")
         client_call_id = None
@@ -311,7 +374,7 @@ async def dashboard_stream(websocket: WebSocket):
     finally:
         dashboard_clients.discard(client)
         Log.info(f"Dashboard disconnected. Total clients: {len(dashboard_clients)}")
-
+        
 
 @app.websocket("/human-audio/{call_sid}")
 async def human_audio_stream(websocket: WebSocket, call_sid: str):
