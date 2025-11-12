@@ -356,12 +356,15 @@ class OpenAIService:
         response_trigger = self.session_manager.create_response_trigger()
         
         Log.info("📤 Sending conversation item...")
+        Log.json("Conversation item", initial_item)
         await connection_manager.send_to_openai(initial_item)
         Log.info("✅ Conversation item sent")
         
         Log.info("📤 Sending response trigger...")
+        Log.json("Response trigger", response_trigger)
         await connection_manager.send_to_openai(response_trigger)
         Log.info("✅ Response trigger sent - AI should start speaking now")
+    
         # --- HUMAN TAKEOVER ---
         def enable_human_takeover(self):
             """Enable human takeover mode - AI stops responding."""
