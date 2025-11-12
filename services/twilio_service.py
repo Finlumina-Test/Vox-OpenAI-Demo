@@ -24,19 +24,38 @@ class TwilioService:
         )
         response.pause(length=1)
         
-        # Speak URL - phonetically spell out session ID
-        session_spoken = ' '.join(list(session_id))  # "x7k9m" → "x 7 k 9 m"
+        # 🔥 IMPROVED: Speak URL with pauses between each character
         response.say(
-            f"To watch this call in real time, visit: vox dot finlumina dot com slash demo slash {session_spoken}.",
+            "To watch this call in real time, visit: vox dot finlumina dot com slash demo slash",
             voice=TwilioService.TWILIO_VOICE
         )
         response.pause(length=0.5)
         
+        # 🔥 NEW: Spell out each character with pauses
+        for char in session_id:
+            if char.isdigit():
+                response.say(char, voice=TwilioService.TWILIO_VOICE)
+            else:
+                # Spell out letters phonetically
+                response.say(char.upper(), voice=TwilioService.TWILIO_VOICE)
+            response.pause(length=0.4)  # Pause between each character
+        
+        response.pause(length=1)
+        
         # Repeat
         response.say(
-            f"Again, that's vox dot finlumina dot com slash demo slash {session_spoken}.",
+            "Again, that's vox dot finlumina dot com slash demo slash",
             voice=TwilioService.TWILIO_VOICE
         )
+        response.pause(length=0.5)
+        
+        for char in session_id:
+            if char.isdigit():
+                response.say(char, voice=TwilioService.TWILIO_VOICE)
+            else:
+                response.say(char.upper(), voice=TwilioService.TWILIO_VOICE)
+            response.pause(length=0.4)
+        
         response.pause(length=1)
         
         # Instruction
@@ -70,6 +89,13 @@ class TwilioService:
         
         response.say(
             "Great! Starting your demo now. You have one minute.",
+            voice=TwilioService.TWILIO_VOICE
+        )
+        response.pause(length=0.5)
+        
+        # 🔥 NEW: Add explicit confirmation that AI is ready
+        response.say(
+            "Connecting you to the AI assistant.",
             voice=TwilioService.TWILIO_VOICE
         )
         
