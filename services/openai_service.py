@@ -330,28 +330,43 @@ class OpenAIService:
         self.human_audio_callback: Optional[callable] = None
 
     # --- SESSION & GREETING ---
+# In services/openai_service.py
+
     async def initialize_session(self, connection_manager) -> None:
+        Log.info("📤 Creating session update message...")
         session_update = self.session_manager.create_session_update()
         Log.json('Sending session update', session_update)
-        await connection_manager.send_to_openai(session_update)
         
-        # ✅ Auto-send greeting after session is ready
-        await asyncio.sleep(0.5)  # Small delay to ensure session is established
+        Log.info("📤 Sending session update to OpenAI...")
+        await connection_manager.send_to_openai(session_update)
+        Log.info("✅ Session update sent successfully")
+        
+        # Wait for session to be established
+        Log.info("⏳ Waiting 0.5s for session to establish...")
+        await asyncio.sleep(0.5)
+        
+        Log.info("🎤 Triggering initial greeting...")
         await self.send_initial_greeting(connection_manager)
-
+        Log.info("✅ Session initialization complete")
+    
     async def send_initial_greeting(self, connection_manager) -> None:
         """Send the initial greeting automatically."""
-        Log.info("🎤 Sending initial greeting...")
+        Log.info("🎤 Preparing initial greeting...")
         initial_item = self.session_manager.create_initial_conversation_item()
         response_trigger = self.session_manager.create_response_trigger()
+        
+        Log.info("📤 Sending conversation item...")
         await connection_manager.send_to_openai(initial_item)
+        Log.info("✅ Conversation item sent")
+        
+        Log.info("📤 Sending response trigger...")
         await connection_manager.send_to_openai(response_trigger)
-
-    # --- HUMAN TAKEOVER ---
-    def enable_human_takeover(self):
-        """Enable human takeover mode - AI stops responding."""
-        self._human_takeover_active = True
-        Log.info("[Takeover] Human takeover ENABLED - AI will not respond")
+        Log.info("✅ Response trigger sent - AI should start speaking now")
+        # --- HUMAN TAKEOVER ---
+        def enable_human_takeover(self):
+            """Enable human takeover mode - AI stops responding."""
+            self._human_takeover_active = True
+            Log.info("[Takeover] Human takeover ENABLED - AI will not respond")
     
     def disable_human_takeover(self):
         """Disable human takeover mode - AI resumes."""
