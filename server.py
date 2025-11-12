@@ -201,7 +201,10 @@ async def handle_demo_start(request: Request):
             call_sid = request.query_params.get('CallSid')
             digits = request.query_params.get('auto', 'auto')
         
-        Log.info(f"🎬 Demo start requested for {call_sid} (pressed: {digits})")
+        # 🔥 NEW: Detect if user pressed key early (skipped intro)
+        skipped = digits != 'auto'  # If not timeout, user pressed key
+        
+        Log.info(f"🎬 Demo start requested for {call_sid} (pressed: {digits}, skipped: {skipped})")
         
         session_id = None
         for sid, data in demo_pending_start.items():
@@ -217,14 +220,14 @@ async def handle_demo_start(request: Request):
             Log.info(f"✅ Demo activated for session: {session_id} (restaurant: {demo_sessions[session_id].get('restaurant_id')})")
         
         backend_host = request.url.hostname
-        twiml = TwilioService.create_demo_start_twiml(backend_host)
+        twiml = TwilioService.create_demo_start_twiml(backend_host, skipped=skipped)
         
         return Response(content=twiml, media_type="application/xml")
         
     except Exception as e:
         Log.error(f"Error starting demo: {e}")
         backend_host = request.url.hostname
-        twiml = TwilioService.create_demo_start_twiml(backend_host)
+        twiml = TwilioService.create_demo_start_twiml(backend_host, skipped=False)
         return Response(content=twiml, media_type="application/xml")
 
 @app.api_route("/demo-rating", methods=["POST"])
