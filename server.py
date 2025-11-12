@@ -273,35 +273,42 @@ async def demo_rating(request: Request):
 
 @app.get("/api/validate-session/{session_id}")
 async def validate_session(session_id: str):
-    """Validate if a demo session exists and is active."""
+    """Validate if a demo session exists and is active (case-insensitive)."""
     try:
         Log.info(f"🔍 Validating session: {session_id}")
         
-        # Check if session exists in either pending or active sessions
-        if session_id in demo_pending_start:
-            session_data = demo_pending_start[session_id]
-            return JSONResponse({
-                "valid": True,
-                "status": "pending",
-                "sessionId": session_id,
-                "callSid": session_data.get('call_sid'),
-                "restaurantId": session_data.get('restaurant_id', 'demo'),
-                "createdAt": session_data.get('created_at')
-            })
+        # 🔥 NEW: Normalize to lowercase for comparison
+        session_id_lower = session_id.lower()
         
-        if session_id in demo_sessions:
-            session_data = demo_sessions[session_id]
-            return JSONResponse({
-                "valid": True,
-                "status": "active",
-                "sessionId": session_id,
-                "callSid": session_data.get('call_sid'),
-                "restaurantId": session_data.get('restaurant_id', 'demo'),
-                "startedAt": session_data.get('started_at')
-            })
+        # Check if session exists in either pending or active sessions (case-insensitive)
+        for sid, data in demo_pending_start.items():
+            if sid.lower() == session_id_lower:
+                Log.info(f"✅ Found pending session: {sid}")
+                return JSONResponse({
+                    "valid": True,
+                    "status": "pending",
+                    "sessionId": sid,  # Return original case
+                    "callSid": data.get('call_sid'),
+                    "restaurantId": data.get('restaurant_id', 'demo'),
+                    "createdAt": data.get('created_at')
+                })
+        
+        for sid, data in demo_sessions.items():
+            if sid.lower() == session_id_lower:
+                Log.info(f"✅ Found active session: {sid}")
+                return JSONResponse({
+                    "valid": True,
+                    "status": "active",
+                    "sessionId": sid,  # Return original case
+                    "callSid": data.get('call_sid'),
+                    "restaurantId": data.get('restaurant_id', 'demo'),
+                    "startedAt": data.get('started_at')
+                })
         
         # Session not found
         Log.warning(f"⚠️ Session not found: {session_id}")
+        Log.info(f"📋 Available pending sessions: {list(demo_pending_start.keys())}")
+        Log.info(f"📋 Available active sessions: {list(demo_sessions.keys())}")
         return JSONResponse({
             "valid": False,
             "error": "Session not found or expired"
@@ -313,7 +320,7 @@ async def validate_session(session_id: str):
             "valid": False,
             "error": "Validation failed"
         }, status_code=500)
-
+        
 
 @app.websocket("/dashboard-stream")
 async def dashboard_stream(websocket: WebSocket):
@@ -627,8 +634,11 @@ async def handle_end_call(request: Request):
 
 @app.websocket("/media-stream")
 async def handle_media_stream(websocket: WebSocket):
-    Log.header("Client connected")
+    Log.header("=" * 80)
+    Log.header("🔌 NEW MEDIA STREAM CONNECTION")
+    Log.header("=" * 80)
     await websocket.accept()
+    Log.info("✅ WebSocket accepted")
 
     connection_manager = WebSocketConnectionManager(websocket)
     openai_service = OpenAIService()
@@ -640,7 +650,7 @@ async def handle_media_stream(websocket: WebSocket):
     ai_silence_detector = SilenceDetector()
     
     current_call_sid: Optional[str] = None
-    restaurant_id: Optional[str] = None  # 🔥 ADDED
+    restaurant_id: Optional[str] = None
     
     demo_session_id: Optional[str] = None
     demo_start_time: Optional[float] = None
@@ -763,19 +773,29 @@ async def handle_media_stream(websocket: WebSocket):
     openai_service.ai_transcript_callback = handle_openai_transcript
 
     try:
+        Log.info("🔗 Step 1: Connecting to OpenAI...")
         try:
             await connection_manager.connect_to_openai()
+            Log.info("✅ Step 1 COMPLETE: OpenAI WebSocket connected")
         except Exception as e:
-            Log.error(f"OpenAI connection failed: {e}")
+            Log.error(f"❌ Step 1 FAILED: OpenAI connection error: {e}")
+            import traceback
+            Log.error(f"📍 Traceback:\n{traceback.format_exc()}")
             await connection_manager.close_openai_connection()
             return
 
+        Log.info("🎬 Step 2: Initializing OpenAI session...")
         try:
             await openai_service.initialize_session(connection_manager)
+            Log.info("✅ Step 2 COMPLETE: OpenAI session initialized & greeting sent")
         except Exception as e:
-            Log.error(f"OpenAI session initialization failed: {e}")
+            Log.error(f"❌ Step 2 FAILED: OpenAI session init error: {e}")
+            import traceback
+            Log.error(f"📍 Traceback:\n{traceback.format_exc()}")
             await connection_manager.close_openai_connection()
             return
+
+        Log.info("🎯 Step 3: Waiting for Twilio stream to start...")
 
         async def handle_media_event(data: dict):
             if data.get("event") == "media":
@@ -811,6 +831,7 @@ async def handle_media_stream(websocket: WebSocket):
                                 audio_message = audio_service.process_incoming_audio(data)
                                 if audio_message:
                                     await connection_manager.send_to_openai(audio_message)
+                                    Log.debug(f"[media] 🎤 Sent caller audio to OpenAI")
                             except Exception as e:
                                 Log.error(f"[media] failed to send to OpenAI: {e}")
                         
@@ -832,6 +853,7 @@ async def handle_media_stream(websocket: WebSocket):
                 delta = audio_data.get("delta")
                 
                 if delta:
+                    Log.debug(f"[audio-delta] 🔊 Received AI audio delta")
                     should_send_to_dashboard = True
                     
                     if getattr(connection_manager.state, "stream_sid", None):
@@ -845,6 +867,7 @@ async def handle_media_stream(websocket: WebSocket):
                                     connection_manager.state.stream_sid
                                 )
                                 await connection_manager.send_to_twilio(mark_msg)
+                                Log.debug(f"[audio-delta] 📞 Sent AI audio to Twilio")
                         except Exception as e:
                             Log.error(f"[audio->twilio] failed: {e}")
                     
@@ -862,7 +885,7 @@ async def handle_media_stream(websocket: WebSocket):
             
             try:
                 if not openai_service.is_human_in_control():
-                    Log.info("🛑 [Interruption] USER SPEAKING")
+                    Log.info("🛑 [Interruption] USER SPEAKING - cancelling AI")
                     
                     last_speech_started_time = time.time()
                     
@@ -901,6 +924,24 @@ async def handle_media_stream(websocket: WebSocket):
                 Log.error(f"[Interruption] Error: {e}")
 
         async def handle_other_openai_event(response: dict):
+            event_type = response.get('type', '')
+            
+            # 🔥 NEW: Log important OpenAI events
+            if event_type == 'session.created':
+                Log.info("✅ [OpenAI] Session created successfully")
+            elif event_type == 'session.updated':
+                Log.info("✅ [OpenAI] Session updated successfully")
+            elif event_type == 'response.audio_transcript.delta':
+                Log.debug(f"[OpenAI] 📝 AI transcript delta received")
+            elif event_type == 'response.audio_transcript.done':
+                Log.debug(f"[OpenAI] ✅ AI transcript complete")
+            elif event_type == 'conversation.item.input_audio_transcription.completed':
+                Log.debug(f"[OpenAI] 📝 Caller transcript received")
+            elif event_type == 'response.done':
+                Log.debug(f"[OpenAI] ✅ Response complete")
+            elif event_type == 'error':
+                Log.error(f"[OpenAI] ❌ Error event: {response}")
+            
             openai_service.process_event_for_logging(response)
             await openai_service.extract_caller_transcript(response)
             
@@ -908,6 +949,7 @@ async def handle_media_stream(websocket: WebSocket):
                 await openai_service.extract_ai_transcript(response)
        
         async def openai_receiver():
+            Log.info("[OpenAI Receiver] 🎧 Started listening for OpenAI events...")
             await connection_manager.receive_from_openai(
                 handle_audio_delta,
                 handle_speech_started,
@@ -929,22 +971,37 @@ async def handle_media_stream(websocket: WebSocket):
         async def on_start_cb(stream_sid: str):
             nonlocal current_call_sid, ai_stream_task, demo_session_id, demo_start_time, restaurant_id
             
+            Log.header("=" * 80)
+            Log.header("📞 TWILIO STREAM STARTED")
+            Log.header("=" * 80)
+            
             current_call_sid = getattr(connection_manager.state, 'call_sid', stream_sid)
             Log.event("Twilio Start", {"streamSid": stream_sid, "callSid": current_call_sid})
             
-            # 🔥 MODIFIED: Find demo session AND restaurant_id
+            # Find demo session AND restaurant_id
             for sid, data in demo_sessions.items():
                 if data.get('call_sid') == current_call_sid:
                     demo_session_id = sid
                     demo_start_time = time.time()
-                    restaurant_id = data.get('restaurant_id', 'default')  # 🔥 ADDED
+                    restaurant_id = data.get('restaurant_id', 'default')
                     Log.info(f"🎯 Found demo session: {demo_session_id}")
                     Log.info(f"🏪 Restaurant ID: {restaurant_id}")
                     Log.info(f"⏱️ Demo timer started - expires in {Config.DEMO_DURATION_SECONDS}s")
+                    
+                    # Broadcast call start to dashboards
+                    broadcast_to_dashboards_nonblocking({
+                        "messageType": "callStarted",
+                        "callSid": current_call_sid,
+                        "sessionId": demo_session_id,
+                        "timestamp": int(time.time() * 1000)
+                    }, current_call_sid)
+                    
                     break
             
             if not demo_session_id:
                 Log.warning("⚠️ No demo session found for this call")
+                Log.info(f"📋 Available demo sessions: {list(demo_sessions.keys())}")
+                Log.info(f"📋 Call SID searching for: {current_call_sid}")
             
             if demo_session_id and demo_start_time:
                 asyncio.create_task(check_demo_timer())
@@ -956,9 +1013,8 @@ async def handle_media_stream(websocket: WebSocket):
                 ai_stream_task = asyncio.create_task(ai_audio_streamer())
                 Log.info("[AI Streamer] Task started")
             
-            # 🔥 MODIFIED: Store restaurant_id with call
             active_calls[current_call_sid] = {
-                "restaurant_id": restaurant_id,  # 🔥 ADDED
+                "restaurant_id": restaurant_id,
                 "openai_service": openai_service,
                 "connection_manager": connection_manager,
                 "audio_service": audio_service,
@@ -966,7 +1022,8 @@ async def handle_media_stream(websocket: WebSocket):
                 "order_extractor": order_extractor,
                 "human_audio_ws": None
             }
-            Log.info(f"[ActiveCalls] Registered call {current_call_sid} for restaurant {restaurant_id}")
+            Log.info(f"[ActiveCalls] ✅ Registered call {current_call_sid} for restaurant {restaurant_id}")
+            Log.info("🎧 Waiting for caller audio...")
 
             async def send_order_update(order_data: Dict[str, Any]):
                 payload = {
@@ -985,6 +1042,7 @@ async def handle_media_stream(websocket: WebSocket):
                 except Exception:
                     pass
 
+            Log.info("🚀 Starting main event loops (Twilio + OpenAI + Session Renewal)...")
             await asyncio.gather(
                 connection_manager.receive_from_twilio(handle_media_event, on_start_cb, on_mark_cb),
                 openai_receiver(),
@@ -992,8 +1050,11 @@ async def handle_media_stream(websocket: WebSocket):
             )
 
     except Exception as e:
-        Log.error(f"Error in media stream handler: {e}")
+        Log.error(f"❌ CRITICAL ERROR in media stream handler: {e}")
+        import traceback
+        Log.error(f"📍 Traceback:\n{traceback.format_exc()}")
     finally:
+        Log.info("🧹 Cleaning up media stream...")
         shutdown_flag = True
         try:
             await ai_audio_queue.put(None)
@@ -1019,6 +1080,7 @@ async def handle_media_stream(websocket: WebSocket):
 
         if current_call_sid and current_call_sid in active_calls:
             del active_calls[current_call_sid]
+            Log.info(f"[ActiveCalls] ❌ Removed call {current_call_sid}")
 
         try:
             await transcription_service.shutdown()
@@ -1034,7 +1096,8 @@ async def handle_media_stream(websocket: WebSocket):
             await connection_manager.close_openai_connection()
         except Exception:
             pass
-
+        
+        Log.info("✅ Media stream cleanup complete")
 
 if __name__ == "__main__":
     import uvicorn
