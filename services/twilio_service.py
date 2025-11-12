@@ -14,66 +14,67 @@ class TwilioService:
     def create_demo_intro_twiml(session_id: str, backend_url: str) -> str:
         """
         TwiML that speaks dashboard URL and waits for key press to start demo.
+        🔥 NEW: User can press any key to skip the URL announcement
         """
         response = VoiceResponse()
         
+        # 🔥 NEW: Gather wraps EVERYTHING so user can skip anytime
+        gather = Gather(
+            num_digits=1,
+            timeout=60,  # Total time for entire intro
+            action=f"{backend_url}/demo-start",
+            method="POST"
+        )
+        
         # Welcome
-        response.say(
+        gather.say(
             "Welcome to VOX by Finlumina. Your live demo dashboard is ready.",
             voice=TwilioService.TWILIO_VOICE
         )
-        response.pause(length=1)
+        gather.pause(length=1)
         
-        # 🔥 IMPROVED: Speak URL with pauses between each character
-        response.say(
+        # Speak URL - phonetically spell out session ID
+        gather.say(
             "To watch this call in real time, visit: vox dot finlumina dot com slash demo slash",
             voice=TwilioService.TWILIO_VOICE
         )
-        response.pause(length=0.5)
+        gather.pause(length=0.5)
         
-        # 🔥 NEW: Spell out each character with pauses
+        # Spell out each character with pauses
         for char in session_id:
             if char.isdigit():
-                response.say(char, voice=TwilioService.TWILIO_VOICE)
+                gather.say(char, voice=TwilioService.TWILIO_VOICE)
             else:
-                # Spell out letters phonetically
-                response.say(char.upper(), voice=TwilioService.TWILIO_VOICE)
-            response.pause(length=0.4)  # Pause between each character
+                gather.say(char.upper(), voice=TwilioService.TWILIO_VOICE)
+            gather.pause(length=0.4)
         
-        response.pause(length=1)
+        gather.pause(length=1)
         
         # Repeat
-        response.say(
+        gather.say(
             "Again, that's vox dot finlumina dot com slash demo slash",
             voice=TwilioService.TWILIO_VOICE
         )
-        response.pause(length=0.5)
+        gather.pause(length=0.5)
         
         for char in session_id:
             if char.isdigit():
-                response.say(char, voice=TwilioService.TWILIO_VOICE)
+                gather.say(char, voice=TwilioService.TWILIO_VOICE)
             else:
-                response.say(char.upper(), voice=TwilioService.TWILIO_VOICE)
-            response.pause(length=0.4)
+                gather.say(char.upper(), voice=TwilioService.TWILIO_VOICE)
+            gather.pause(length=0.4)
         
-        response.pause(length=1)
+        gather.pause(length=1)
         
         # Instruction
-        response.say(
+        gather.say(
             "Press any key on your keypad when you are ready to start your one minute demo.",
             voice=TwilioService.TWILIO_VOICE
         )
         
-        # Wait for key
-        gather = Gather(
-            num_digits=1,
-            timeout=30,
-            action=f"{backend_url}/demo-start",
-            method="POST"
-        )
         response.append(gather)
         
-        # Timeout fallback
+        # Timeout fallback (if no key pressed after 60s)
         response.say(
             "Starting demo now.",
             voice=TwilioService.TWILIO_VOICE
@@ -83,21 +84,23 @@ class TwilioService:
         return str(response)
     
     @staticmethod
-    def create_demo_start_twiml(backend_host: str) -> str:
-        """TwiML to start OpenAI media stream after key press."""
+    def create_demo_start_twiml(backend_host: str, skipped: bool = False) -> str:
+        """
+        TwiML to start OpenAI media stream after key press.
+        🔥 NEW: Different message if user skipped the intro
+        """
         response = VoiceResponse()
         
-        response.say(
-            "Great! Starting your demo now. You have one minute.",
-            voice=TwilioService.TWILIO_VOICE
-        )
-        response.pause(length=0.5)
-        
-        # 🔥 NEW: Add explicit confirmation that AI is ready
-        response.say(
-            "Connecting you to the AI assistant.",
-            voice=TwilioService.TWILIO_VOICE
-        )
+        if skipped:
+            response.say(
+                "Skipping to demo. Connecting you now.",
+                voice=TwilioService.TWILIO_VOICE
+            )
+        else:
+            response.say(
+                "Great! Starting your demo now. You have one minute.",
+                voice=TwilioService.TWILIO_VOICE
+            )
         
         # Connect to media stream
         connect = Connect()
