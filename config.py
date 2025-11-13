@@ -26,11 +26,8 @@ class Config:
     TWILIO_AUTH_TOKEN: str | None = os.getenv('TWILIO_AUTH_TOKEN')
     TWILIO_PHONE_NUMBER: str | None = os.getenv('TWILIO_PHONE_NUMBER')
 
-    # 🔥 Email Configuration for Feedback
-    SMTP_SERVER: str = os.getenv('SMTP_SERVER', 'smtp.gmail.com')
-    SMTP_PORT: int = int(os.getenv('SMTP_PORT', '587'))
-    SMTP_USER: str | None = os.getenv('SMTP_USER')
-    SMTP_PASS: str | None = os.getenv('SMTP_PASS')
+    # 🔥 Email Configuration (Resend)
+    RESEND_API_KEY: str | None = os.getenv('RESEND_API_KEY')
     FEEDBACK_EMAIL: str = os.getenv('FEEDBACK_EMAIL', 'faizan@finlumina.com')
 
     # 🔥 Demo Configuration
@@ -182,8 +179,8 @@ class Config:
         return bool(cls.TWILIO_ACCOUNT_SID and cls.TWILIO_AUTH_TOKEN)
 
     @classmethod
-    def has_smtp_credentials(cls) -> bool:
-        return bool(cls.SMTP_USER and cls.SMTP_PASS)
+    def has_email_configured(cls) -> bool:
+        return bool(cls.RESEND_API_KEY)
 
 
 # Initialize and validate
