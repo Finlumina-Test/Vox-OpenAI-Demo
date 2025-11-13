@@ -90,45 +90,43 @@ def broadcast_to_dashboards_nonblocking(payload: Dict[str, Any], call_sid: Optio
 
 # ===== EMAIL HELPER =====
 def send_rating_email(rating: int, call_sid: str, phone: str, session_id: str = None):
-    """Send rating notification email."""
+    """Send rating notification email using Resend."""
     try:
-        if not Config.has_smtp_credentials():
-            Log.warning("📧 SMTP not configured - skipping email")
+        resend_api_key = os.getenv('RESEND_API_KEY')
+        
+        if not resend_api_key:
+            Log.warning("📧 Resend API key not configured - skipping email")
             return
         
-        # Create email
+        import resend
+        resend.api_key = resend_api_key
+        
         subject = f"VOX Demo Rating: {rating}/5 {'⭐' * rating}"
         
-        body = f"""
-New VOX AI Demo Feedback Received!
-
-Rating: {rating}/5 {'⭐' * rating}
-Phone: {phone}
-Call SID: {call_sid}
-Session ID: {session_id or 'N/A'}
-Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
-
-Dashboard: https://vox.finlumina.com/demo/{session_id or 'N/A'}
-
----
-Finlumina VOX Demo System
-"""
+        html_body = f"""
+        <h2>New VOX AI Demo Feedback Received!</h2>
+        <p><strong>Rating:</strong> {rating}/5 {'⭐' * rating}</p>
+        <p><strong>Phone:</strong> {phone}</p>
+        <p><strong>Call SID:</strong> {call_sid}</p>
+        <p><strong>Session ID:</strong> {session_id or 'N/A'}</p>
+        <p><strong>Time:</strong> {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</p>
+        <p><a href="https://vox.finlumina.com/demo/{session_id or 'N/A'}">View Dashboard</a></p>
+        <hr>
+        <p><small>Finlumina VOX Demo System</small></p>
+        """
         
-        msg = MIMEText(body)
-        msg['Subject'] = subject
-        msg['From'] = Config.SMTP_USER
-        msg['To'] = Config.FEEDBACK_EMAIL
+        params = {
+            "from": "VOX Demo <onboarding@resend.dev>",  # Default sender for testing
+            "to": [Config.FEEDBACK_EMAIL],
+            "subject": subject,
+            "html": html_body,
+        }
         
-        # Send email
-        with smtplib.SMTP(Config.SMTP_SERVER, Config.SMTP_PORT) as server:
-            server.starttls()
-            server.login(Config.SMTP_USER, Config.SMTP_PASS)
-            server.send_message(msg)
-        
-        Log.info(f"📧 Rating email sent: {rating}/5 to {Config.FEEDBACK_EMAIL}")
+        email = resend.Emails.send(params)
+        Log.info(f"📧 Rating email sent via Resend: {rating}/5 to {Config.FEEDBACK_EMAIL}")
         
     except Exception as e:
-        Log.error(f"📧 Failed to send rating email: {e}")
+        Log.warning(f"📧 Could not send rating email: {e}")
 
 
 # ===== FASTAPI APP =====
