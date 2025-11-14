@@ -1,5 +1,4 @@
 # server.py - PART 1: IMPORTS AND HELPER FUNCTIONS
-# Replace lines 1-100 of your server.py with this
 
 import os
 import json
@@ -7,9 +6,7 @@ import time
 import base64
 import asyncio
 import secrets
-import smtplib
 from typing import Set, Optional, Dict, Any
-from email.mime.text import MIMEText
 from datetime import datetime
 
 from fastapi import FastAPI, WebSocket, Request
@@ -89,44 +86,55 @@ def broadcast_to_dashboards_nonblocking(payload: Dict[str, Any], call_sid: Optio
 
 
 # ===== EMAIL HELPER =====
-def send_rating_email(rating: int, call_sid: str, phone: str, session_id: str = None):
-    """Send rating notification email using Resend."""
+def send_call_summary_email(call_sid: str, session_id: str = None, phone: str = 'Unknown', duration_seconds: int = None, rating: int = None):
+    """Send call summary email (with or without rating)."""
     try:
-        resend_api_key = os.getenv('RESEND_API_KEY')
-        
-        if not resend_api_key:
-            Log.warning("📧 Resend API key not configured - skipping email")
+        if not Config.has_email_configured():
+            Log.warning("📧 Resend not configured - skipping email")
             return
         
         import resend
-        resend.api_key = resend_api_key
+        resend.api_key = Config.RESEND_API_KEY
         
-        subject = f"VOX Demo Rating: {rating}/5 {'⭐' * rating}"
+        # Build subject
+        if rating:
+            subject = f"VOX Demo Rating: {rating}/5 {'⭐' * rating}"
+        else:
+            subject = f"VOX Demo Call Ended - {call_sid[:8]}"
         
+        # Build duration string
+        duration_str = "Unknown"
+        if duration_seconds is not None:
+            mins = duration_seconds // 60
+            secs = duration_seconds % 60
+            duration_str = f"{mins}m {secs}s"
+        
+        # Build HTML body
         html_body = f"""
-        <h2>New VOX AI Demo Feedback Received!</h2>
-        <p><strong>Rating:</strong> {rating}/5 {'⭐' * rating}</p>
+        <h2>{'New VOX AI Demo Feedback!' if rating else 'VOX Demo Call Summary'}</h2>
+        {'<p><strong>Rating:</strong> ' + str(rating) + '/5 ' + '⭐' * rating + '</p>' if rating else '<p><strong>Status:</strong> Call ended without rating</p>'}
         <p><strong>Phone:</strong> {phone}</p>
         <p><strong>Call SID:</strong> {call_sid}</p>
         <p><strong>Session ID:</strong> {session_id or 'N/A'}</p>
+        <p><strong>Duration:</strong> {duration_str}</p>
         <p><strong>Time:</strong> {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</p>
-        <p><a href="https://vox.finlumina.com/demo/{session_id or 'N/A'}">View Dashboard</a></p>
+        {f'<p><a href="https://vox.finlumina.com/demo/{session_id}">View Dashboard</a></p>' if session_id else ''}
         <hr>
         <p><small>Finlumina VOX Demo System</small></p>
         """
         
         params = {
-            "from": "VOX Demo <onboarding@resend.dev>",  # Default sender for testing
+            "from": "VOX Demo <onboarding@resend.dev>",
             "to": [Config.FEEDBACK_EMAIL],
             "subject": subject,
             "html": html_body,
         }
         
-        email = resend.Emails.send(params)
-        Log.info(f"📧 Rating email sent via Resend: {rating}/5 to {Config.FEEDBACK_EMAIL}")
+        resend.Emails.send(params)
+        Log.info(f"📧 Call summary email sent to {Config.FEEDBACK_EMAIL}")
         
     except Exception as e:
-        Log.warning(f"📧 Could not send rating email: {e}")
+        Log.warning(f"📧 Could not send call summary email: {e}")
 
 
 # ===== FASTAPI APP =====
@@ -155,18 +163,16 @@ async def handle_incoming_call(request: Request):
         call_sid = form_data.get('CallSid')
         from_phone = form_data.get('From')
         
-        # 🔥 NEW: Extract restaurant_id from query params or header
         restaurant_id = request.query_params.get('restaurant_id') or request.headers.get('X-Restaurant-ID', 'default')
         
         # Generate session ID (short and easy)
         session_id = secrets.token_urlsafe(6)
         
-        # 🔥 MODIFIED: Store restaurant_id with session
         demo_pending_start[session_id] = {
             'call_sid': call_sid,
             'phone': from_phone,
             'created_at': time.time(),
-            'restaurant_id': restaurant_id  # 🔥 ADDED
+            'restaurant_id': restaurant_id
         }
         
         Log.info(f"📞 Incoming call: {call_sid} for restaurant: {restaurant_id}")
@@ -199,8 +205,7 @@ async def handle_demo_start(request: Request):
             call_sid = request.query_params.get('CallSid')
             digits = request.query_params.get('auto', 'auto')
         
-        # 🔥 NEW: Detect if user pressed key early (skipped intro)
-        skipped = digits != 'auto'  # If not timeout, user pressed key
+        skipped = digits != 'auto'
         
         Log.info(f"🎬 Demo start requested for {call_sid} (pressed: {digits}, skipped: {skipped})")
         
@@ -211,7 +216,6 @@ async def handle_demo_start(request: Request):
                 break
         
         if session_id:
-            # Move from pending to active, preserving restaurant_id
             demo_sessions[session_id] = demo_pending_start.pop(session_id)
             demo_sessions[session_id]['started_at'] = time.time()
             demo_sessions[session_id]['demo_active'] = True
@@ -253,13 +257,26 @@ async def demo_rating(request: Request):
         
         # Find session for this call
         session_id = None
+        session_data = None
         for sid, data in demo_sessions.items():
             if data.get('call_sid') == call_sid:
                 session_id = sid
+                session_data = data
                 break
         
+        # Calculate duration
+        duration = None
+        if session_data and session_data.get('started_at'):
+            duration = int(time.time() - session_data['started_at'])
+        
         # Send email with rating
-        send_rating_email(rating, call_sid, from_phone, session_id)
+        send_call_summary_email(
+            call_sid=call_sid,
+            session_id=session_id,
+            phone=from_phone,
+            duration_seconds=duration,
+            rating=rating
+        )
         
         # Thank user and end call
         twiml = TwilioService.create_rating_response_twiml(rating)
@@ -278,17 +295,15 @@ async def validate_session(session_id: str):
     try:
         Log.info(f"🔍 Validating session: {session_id}")
         
-        # 🔥 NEW: Normalize to lowercase for comparison
         session_id_lower = session_id.lower()
         
-        # Check if session exists in either pending or active sessions (case-insensitive)
         for sid, data in demo_pending_start.items():
             if sid.lower() == session_id_lower:
                 Log.info(f"✅ Found pending session: {sid}")
                 return JSONResponse({
                     "valid": True,
                     "status": "pending",
-                    "sessionId": sid,  # Return original case
+                    "sessionId": sid,
                     "callSid": data.get('call_sid'),
                     "restaurantId": data.get('restaurant_id', 'demo'),
                     "createdAt": data.get('created_at')
@@ -300,13 +315,12 @@ async def validate_session(session_id: str):
                 return JSONResponse({
                     "valid": True,
                     "status": "active",
-                    "sessionId": sid,  # Return original case
+                    "sessionId": sid,
                     "callSid": data.get('call_sid'),
                     "restaurantId": data.get('restaurant_id', 'demo'),
                     "startedAt": data.get('started_at')
                 })
         
-        # Session not found
         Log.warning(f"⚠️ Session not found: {session_id}")
         Log.info(f"📋 Available pending sessions: {list(demo_pending_start.keys())}")
         Log.info(f"📋 Available active sessions: {list(demo_sessions.keys())}")
@@ -328,7 +342,7 @@ async def dashboard_stream(websocket: WebSocket):
     await websocket.accept()
     DASHBOARD_TOKEN = os.getenv("DASHBOARD_TOKEN")
     client_call_id: Optional[str] = None
-    client_session_id: Optional[str] = None  # 🔥 NEW
+    client_session_id: Optional[str] = None
 
     if DASHBOARD_TOKEN:
         provided = websocket.query_params.get("token") or websocket.headers.get("x-dashboard-token")
@@ -340,15 +354,12 @@ async def dashboard_stream(websocket: WebSocket):
         msg = await asyncio.wait_for(websocket.receive_text(), timeout=5)
         data = json.loads(msg)
         client_call_id = data.get("callId")
-        client_session_id = data.get("sessionId")  # 🔥 NEW
+        client_session_id = data.get("sessionId")
         
-        # 🔥 NEW: If sessionId provided, resolve to callSid
         if client_session_id and not client_call_id:
-            # Check in active sessions
             if client_session_id in demo_sessions:
                 client_call_id = demo_sessions[client_session_id].get('call_sid')
                 Log.info(f"📡 Dashboard subscribed to session {client_session_id} → call {client_call_id}")
-            # Check in pending sessions
             elif client_session_id in demo_pending_start:
                 client_call_id = demo_pending_start[client_session_id].get('call_sid')
                 Log.info(f"📡 Dashboard subscribed to pending session {client_session_id} → call {client_call_id}")
@@ -461,7 +472,7 @@ async def handle_takeover(request: Request):
         data = await request.json()
         call_sid = data.get("callSid")
         action = data.get("action")
-        restaurant_id = data.get("restaurantId")  # 🔥 ADDED
+        restaurant_id = data.get("restaurantId")
         
         Log.info(f"[Takeover] Request: {action} for call {call_sid} (restaurant: {restaurant_id})")
         
@@ -475,7 +486,6 @@ async def handle_takeover(request: Request):
         
         call_data = active_calls[call_sid]
         
-        # 🔥 NEW: Validate restaurant_id matches
         if restaurant_id and call_data.get("restaurant_id") != restaurant_id:
             Log.error(f"[Takeover] Restaurant ID mismatch: expected {call_data.get('restaurant_id')}, got {restaurant_id}")
             return JSONResponse({"error": "Restaurant ID mismatch"}, status_code=403)
@@ -559,7 +569,7 @@ async def handle_end_call(request: Request):
     try:
         data = await request.json()
         call_sid = data.get("callSid")
-        restaurant_id = data.get("restaurantId")  # 🔥 ADDED
+        restaurant_id = data.get("restaurantId")
         
         Log.info(f"[EndCall] Request to end call {call_sid} (restaurant: {restaurant_id})")
         
@@ -569,7 +579,6 @@ async def handle_end_call(request: Request):
         if call_sid not in active_calls:
             Log.warning(f"[EndCall] Call {call_sid} not in active_calls (might have ended)")
         else:
-            # 🔥 NEW: Validate restaurant_id if call exists
             call_data = active_calls[call_sid]
             if restaurant_id and call_data.get("restaurant_id") != restaurant_id:
                 Log.error(f"[EndCall] Restaurant ID mismatch: expected {call_data.get('restaurant_id')}, got {restaurant_id}")
@@ -664,7 +673,7 @@ async def handle_media_stream(websocket: WebSocket):
     ai_currently_speaking = False
     last_speech_started_time = 0
     
-    # 🔥 NEW: Event to wait for Twilio connection
+    # 🔥 Event to wait for Twilio connection
     twilio_connected = asyncio.Event()
 
     # 🔥 DEMO TIMER
@@ -930,10 +939,9 @@ async def handle_media_stream(websocket: WebSocket):
         async def handle_other_openai_event(response: dict):
             event_type = response.get('type', '')
             
-            # 🔥 LOG EVERY EVENT FROM OPENAI
+            # Log every event from OpenAI
             Log.info(f"[OpenAI Event] {event_type}")
             
-            # Log important OpenAI events
             if event_type == 'session.created':
                 Log.info("✅ [OpenAI] Session created successfully")
             elif event_type == 'session.updated':
@@ -954,7 +962,7 @@ async def handle_media_stream(websocket: WebSocket):
             
             if not openai_service.is_human_in_control():
                 await openai_service.extract_ai_transcript(response)
-       
+
         async def openai_receiver():
             Log.info("[OpenAI Receiver] 🎧 Started listening for OpenAI events...")
             await connection_manager.receive_from_openai(
@@ -995,7 +1003,6 @@ async def handle_media_stream(websocket: WebSocket):
                     Log.info(f"🏪 Restaurant ID: {restaurant_id}")
                     Log.info(f"⏱️ Demo timer started - expires in {Config.DEMO_DURATION_SECONDS}s")
                     
-                    # Broadcast call start to dashboards
                     broadcast_to_dashboards_nonblocking({
                         "messageType": "callStarted",
                         "callSid": current_call_sid,
@@ -1065,7 +1072,7 @@ async def handle_media_stream(websocket: WebSocket):
         
         # NOW start the other loops
         await asyncio.gather(
-            twilio_task,  # Already running
+            twilio_task,
             openai_receiver(),
             renew_openai_session(),
         )
@@ -1077,6 +1084,33 @@ async def handle_media_stream(websocket: WebSocket):
     finally:
         Log.info("🧹 Cleaning up media stream...")
         shutdown_flag = True
+        
+        # 🔥 NEW: Send call summary email (even if no rating)
+        if current_call_sid:
+            try:
+                # Find session info
+                session_info = None
+                for sid, data in demo_sessions.items():
+                    if data.get('call_sid') == current_call_sid:
+                        session_info = {'session_id': sid, **data}
+                        break
+                
+                # Get call duration
+                call_duration = None
+                if demo_start_time:
+                    call_duration = int(time.time() - demo_start_time)
+                
+                # Send summary email (without rating - call ended early)
+                send_call_summary_email(
+                    call_sid=current_call_sid,
+                    session_id=session_info.get('session_id') if session_info else None,
+                    phone=session_info.get('phone') if session_info else 'Unknown',
+                    duration_seconds=call_duration,
+                    rating=None  # No rating - call ended without feedback
+                )
+            except Exception as e:
+                Log.error(f"Failed to send call summary email: {e}")
+        
         try:
             await ai_audio_queue.put(None)
             if ai_stream_task and not ai_stream_task.done():
@@ -1119,6 +1153,7 @@ async def handle_media_stream(websocket: WebSocket):
             pass
         
         Log.info("✅ Media stream cleanup complete")
+
 
 if __name__ == "__main__":
     import uvicorn
