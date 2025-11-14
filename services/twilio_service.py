@@ -28,7 +28,7 @@ class TwilioService:
         
         # Welcome - NO PAUSE (faster)
         gather.say(
-            "Welcome to VOX by Finlumina. Your live demo dashboard is ready.",
+            "Welcome to vox by Finlumina. Your live demo dashboard is ready.",
             voice=TwilioService.TWILIO_VOICE
         )
         gather.pause(length=0.3)  # 🔥 Reduced from 1s
@@ -118,10 +118,10 @@ class TwilioService:
             "Your demo session has expired. We hope you enjoyed it!",
             voice=TwilioService.TWILIO_VOICE
         )
-        response.pause(length=0.5)  # 🔥 Reduced from 1s
+        response.pause(length=0.3)  # 🔥 Reduced from 1s
         
         response.say(
-            "To get VOX for your business, contact sales at finlumina dot com.",
+            "To get Vox for your business, contact sales at vox dot finlumina dot com.",
             voice=TwilioService.TWILIO_VOICE
         )
         response.pause(length=0.5)  # 🔥 Reduced from 1s
@@ -140,7 +140,7 @@ class TwilioService:
         response.append(gather)
         
         response.say(
-            "We didn't receive your rating. Thank you for trying VOX. Goodbye!",
+            "We didn't receive your rating. Thank you for trying vox. Goodbye!",
             voice=TwilioService.TWILIO_VOICE
         )
         
