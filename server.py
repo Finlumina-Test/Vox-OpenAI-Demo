@@ -88,13 +88,28 @@ def broadcast_to_dashboards_nonblocking(payload: Dict[str, Any], call_sid: Optio
 # ===== EMAIL HELPER =====
 def send_call_summary_email(call_sid: str, session_id: str = None, phone: str = 'Unknown', duration_seconds: int = None, rating: int = None, ended_early: bool = False):
     """Send call summary email (with or without rating)."""
+    Log.info("=" * 80)
+    Log.info("📧 SEND_CALL_SUMMARY_EMAIL CALLED")
+    Log.info("=" * 80)
+    Log.info(f"  call_sid: {call_sid}")
+    Log.info(f"  session_id: {session_id}")
+    Log.info(f"  phone: {phone}")
+    Log.info(f"  duration_seconds: {duration_seconds}")
+    Log.info(f"  rating: {rating}")
+    Log.info(f"  ended_early: {ended_early}")
+    
     try:
         if not Config.has_email_configured():
             Log.warning("📧 Resend not configured - skipping email")
+            Log.warning(f"  RESEND_API_KEY present: {bool(Config.RESEND_API_KEY)}")
             return
+        
+        Log.info("✅ Email is configured - proceeding...")
         
         import resend
         resend.api_key = Config.RESEND_API_KEY
+        
+        Log.info(f"✅ Resend API key set: {Config.RESEND_API_KEY[:10]}...")
         
         # Build subject
         if rating:
@@ -103,6 +118,8 @@ def send_call_summary_email(call_sid: str, session_id: str = None, phone: str = 
             subject = f"VOX Demo - Call Ended Early - {call_sid[:8]}"
         else:
             subject = f"VOX Demo Call Summary - {call_sid[:8]}"
+        
+        Log.info(f"📧 Email subject: {subject}")
         
         # Build duration string
         duration_str = "Unknown"
@@ -157,11 +174,18 @@ def send_call_summary_email(call_sid: str, session_id: str = None, phone: str = 
             "html": html_body,
         }
         
-        resend.Emails.send(params)
-        Log.info(f"📧 Call summary email sent to {Config.FEEDBACK_EMAIL} ({feedback_status})")
+        Log.info(f"📧 Sending email to: {Config.FEEDBACK_EMAIL}")
+        Log.info(f"📧 Email params: from={params['from']}, to={params['to']}, subject={params['subject']}")
+        
+        result = resend.Emails.send(params)
+        
+        Log.info(f"✅ Resend API response: {result}")
+        Log.info(f"✅ Call summary email sent to {Config.FEEDBACK_EMAIL} ({feedback_status})")
         
     except Exception as e:
-        Log.warning(f"📧 Could not send call summary email: {e}")
+        Log.error(f"📧 Could not send call summary email: {e}")
+        import traceback
+        Log.error(f"Traceback: {traceback.format_exc()}")
 
 
 # ===== FASTAPI APP =====
@@ -343,34 +367,54 @@ async def demo_rating(request: Request):
 async def handle_call_status(request: Request):
     """Handle Twilio call status callbacks (hangup tracking)."""
     try:
+        Log.info("=" * 80)
+        Log.info("🔥 CALL STATUS CALLBACK RECEIVED")
+        Log.info("=" * 80)
+        
         form_data = await request.form()
+        
+        # Log ALL form data
+        Log.info(f"📋 All form data: {dict(form_data)}")
+        
         call_sid = form_data.get('CallSid')
         call_status = form_data.get('CallStatus')
         from_phone = form_data.get('From', 'Unknown')
         call_duration = form_data.get('CallDuration', '0')
         
-        Log.info(f"📞 [StatusCallback] {call_sid} - {call_status} (duration: {call_duration}s)")
+        Log.info(f"📞 [StatusCallback] CallSid: {call_sid}")
+        Log.info(f"📞 [StatusCallback] Status: {call_status}")
+        Log.info(f"📞 [StatusCallback] From: {from_phone}")
+        Log.info(f"📞 [StatusCallback] Duration: {call_duration}s")
         
         # Only process completed/failed calls
         if call_status in ['completed', 'failed', 'busy', 'no-answer']:
+            Log.info(f"✅ Status matches - processing email...")
+            
             # Find session for this call
             session_id = None
             phone = from_phone
             
             # Check active sessions first
+            Log.info(f"🔍 Checking active sessions: {list(demo_sessions.keys())}")
             for sid, data in demo_sessions.items():
                 if data.get('call_sid') == call_sid:
                     session_id = sid
                     phone = data.get('phone', from_phone)
+                    Log.info(f"✅ Found in active sessions: {session_id}")
                     break
             
             # Check pending sessions (hung up before pressing key)
             if not session_id:
+                Log.info(f"🔍 Checking pending sessions: {list(demo_pending_start.keys())}")
                 for sid, data in demo_pending_start.items():
                     if data.get('call_sid') == call_sid:
                         session_id = sid
                         phone = data.get('phone', from_phone)
+                        Log.info(f"✅ Found in pending sessions: {session_id}")
                         break
+            
+            if not session_id:
+                Log.warning(f"⚠️ Session not found for call {call_sid}")
             
             # Send email for early hangups
             try:
@@ -378,9 +422,11 @@ async def handle_call_status(request: Request):
             except:
                 duration_int = 0
             
+            Log.info(f"⏱️ Call duration: {duration_int}s")
+            
             # 🔥 Only send if call was very short (< 55 seconds = ended before demo timer)
-            # This means they hung up early, not completed naturally
             if duration_int < 55:
+                Log.info(f"📧 Call duration < 55s - sending early hangup email...")
                 send_call_summary_email(
                     call_sid=call_sid,
                     session_id=session_id,
@@ -389,13 +435,20 @@ async def handle_call_status(request: Request):
                     rating=None,
                     ended_early=True  # 🔥 Flag as early hangup
                 )
-                Log.info(f"📧 Sent early hangup email for {call_sid} ({duration_int}s)")
+                Log.info(f"✅ Email sent for early hangup: {call_sid} ({duration_int}s)")
+            else:
+                Log.info(f"ℹ️ Call duration >= 55s - skipping email (will be sent by /media-stream cleanup)")
+        else:
+            Log.info(f"ℹ️ Status '{call_status}' not in target list - skipping")
         
-        return Response(content="", status_code=200)
+        Log.info("=" * 80)
+        return Response(content="OK", status_code=200)
         
     except Exception as e:
         Log.error(f"[StatusCallback] Error: {e}")
-        return Response(content="", status_code=200)
+        import traceback
+        Log.error(f"Traceback: {traceback.format_exc()}")
+        return Response(content="ERROR", status_code=200)
         
 
 @app.get("/api/validate-session/{session_id}")
