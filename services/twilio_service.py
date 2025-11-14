@@ -14,57 +14,57 @@ class TwilioService:
     def create_demo_intro_twiml(session_id: str, backend_url: str) -> str:
         """
         TwiML that speaks dashboard URL and waits for key press to start demo.
-        🔥 NEW: User can press any key to skip the URL announcement
+        🔥 User can press any key to skip the URL announcement
         """
         response = VoiceResponse()
         
-        # 🔥 NEW: Gather wraps EVERYTHING so user can skip anytime
+        # 🔥 Gather wraps EVERYTHING so user can skip anytime
         gather = Gather(
             num_digits=1,
-            timeout=60,  # Total time for entire intro
+            timeout=60,
             action=f"{backend_url}/demo-start",
             method="POST"
         )
         
-        # Welcome
+        # Welcome - NO PAUSE (faster)
         gather.say(
             "Welcome to VOX by Finlumina. Your live demo dashboard is ready.",
             voice=TwilioService.TWILIO_VOICE
         )
-        gather.pause(length=1)
+        gather.pause(length=0.3)  # 🔥 Reduced from 1s
         
-        # Speak URL - phonetically spell out session ID
+        # Speak URL
         gather.say(
             "To watch this call in real time, visit: vox dot finlumina dot com slash demo slash",
             voice=TwilioService.TWILIO_VOICE
         )
-        gather.pause(length=0.5)
+        gather.pause(length=0.3)  # 🔥 Reduced from 0.5s
         
-        # Spell out each character with pauses
+        # 🔥 Keep session ID slow (0.4s between chars)
         for char in session_id:
             if char.isdigit():
                 gather.say(char, voice=TwilioService.TWILIO_VOICE)
             else:
                 gather.say(char.upper(), voice=TwilioService.TWILIO_VOICE)
-            gather.pause(length=0.4)
+            gather.pause(length=0.4)  # Keep this as is
         
-        gather.pause(length=1)
+        gather.pause(length=0.5)  # 🔥 Reduced from 1s
         
         # Repeat
         gather.say(
             "Again, that's vox dot finlumina dot com slash demo slash",
             voice=TwilioService.TWILIO_VOICE
         )
-        gather.pause(length=0.5)
+        gather.pause(length=0.3)  # 🔥 Reduced from 0.5s
         
         for char in session_id:
             if char.isdigit():
                 gather.say(char, voice=TwilioService.TWILIO_VOICE)
             else:
                 gather.say(char.upper(), voice=TwilioService.TWILIO_VOICE)
-            gather.pause(length=0.4)
+            gather.pause(length=0.4)  # Keep this as is
         
-        gather.pause(length=1)
+        gather.pause(length=0.5)  # 🔥 Reduced from 1s
         
         # Instruction
         gather.say(
@@ -87,7 +87,7 @@ class TwilioService:
     def create_demo_start_twiml(backend_host: str, skipped: bool = False) -> str:
         """
         TwiML to start OpenAI media stream after key press.
-        🔥 NEW: Different message if user skipped the intro
+        🔥 Different message if user skipped the intro
         """
         response = VoiceResponse()
         
@@ -118,21 +118,16 @@ class TwilioService:
             "Your demo session has expired. We hope you enjoyed it!",
             voice=TwilioService.TWILIO_VOICE
         )
-        response.pause(length=1)
+        response.pause(length=0.5)  # 🔥 Reduced from 1s
         
         response.say(
             "To get VOX for your business, contact sales at finlumina dot com.",
             voice=TwilioService.TWILIO_VOICE
         )
-        response.pause(length=1)
+        response.pause(length=0.5)  # 🔥 Reduced from 1s
         
         response.say(
-            "Please rate your experience from 1 to 5, with 5 being excellent.",
-            voice=TwilioService.TWILIO_VOICE
-        )
-        response.pause(length=0.5)
-        response.say(
-            "Press a number on your phone keypad now. Press 1, 2, 3, 4, or 5.",
+            "Please rate your experience from 1 to 5, with 5 being excellent. Press a number on your phone keypad now.",
             voice=TwilioService.TWILIO_VOICE
         )
         
@@ -160,17 +155,13 @@ class TwilioService:
             f"Thank you for rating us {rating} out of 5!",
             voice=TwilioService.TWILIO_VOICE
         )
-        response.pause(length=0.5)
+        response.pause(length=0.3)  # 🔥 Reduced from 0.5s
         response.say(
-            "We appreciate your feedback.",
-            voice=TwilioService.TWILIO_VOICE
-        )
-        response.pause(length=0.5)
-        response.say(
-            "Visit finlumina dot com to learn more. Goodbye!",
+            "We appreciate your feedback. Visit finlumina dot com to learn more. Goodbye!",
             voice=TwilioService.TWILIO_VOICE
         )
         
+        # 🔥 NEW: Hang up immediately after rating
         response.hangup()
         return str(response)
     
@@ -183,7 +174,7 @@ class TwilioService:
             "Sorry, please rate between 1 and 5 only.",
             voice=TwilioService.TWILIO_VOICE
         )
-        response.pause(length=0.5)
+        response.pause(length=0.3)  # 🔥 Reduced from 0.5s
         response.say(
             "Let's try again. Press a number from 1 to 5 on your keypad.",
             voice=TwilioService.TWILIO_VOICE
