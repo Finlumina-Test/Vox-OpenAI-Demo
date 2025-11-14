@@ -86,7 +86,7 @@ def broadcast_to_dashboards_nonblocking(payload: Dict[str, Any], call_sid: Optio
 
 
 # ===== EMAIL HELPER =====
-def send_call_summary_email(call_sid: str, session_id: str = None, phone: str = 'Unknown', duration_seconds: int = None, rating: int = None):
+def send_call_summary_email(call_sid: str, session_id: str = None, phone: str = 'Unknown', duration_seconds: int = None, rating: int = None, ended_early: bool = False):
     """Send call summary email (with or without rating)."""
     try:
         if not Config.has_email_configured():
@@ -99,28 +99,55 @@ def send_call_summary_email(call_sid: str, session_id: str = None, phone: str = 
         # Build subject
         if rating:
             subject = f"VOX Demo Rating: {rating}/5 {'⭐' * rating}"
+        elif ended_early:
+            subject = f"VOX Demo - Call Ended Early - {call_sid[:8]}"
         else:
-            subject = f"VOX Demo Call Ended - {call_sid[:8]}"
+            subject = f"VOX Demo Call Summary - {call_sid[:8]}"
         
         # Build duration string
         duration_str = "Unknown"
         if duration_seconds is not None:
-            mins = duration_seconds // 60
-            secs = duration_seconds % 60
-            duration_str = f"{mins}m {secs}s"
+            if duration_seconds < 60:
+                duration_str = f"{duration_seconds}s"
+            else:
+                mins = duration_seconds // 60
+                secs = duration_seconds % 60
+                duration_str = f"{mins}m {secs}s"
+        
+        # Build feedback section
+        if rating:
+            feedback_html = f'<p><strong>⭐ Rating:</strong> {rating}/5 {"⭐" * rating}</p>'
+            feedback_status = f"User rated: {rating}/5"
+        elif ended_early:
+            feedback_html = '<p><strong>❌ Feedback:</strong> <span style="color: #ff6b6b;">No feedback available - User ended call early</span></p>'
+            feedback_status = "No feedback - ended early"
+        else:
+            feedback_html = '<p><strong>ℹ️ Feedback:</strong> Call completed without rating</p>'
+            feedback_status = "No rating collected"
         
         # Build HTML body
         html_body = f"""
-        <h2>{'New VOX AI Demo Feedback!' if rating else 'VOX Demo Call Summary'}</h2>
-        {'<p><strong>Rating:</strong> ' + str(rating) + '/5 ' + '⭐' * rating + '</p>' if rating else '<p><strong>Status:</strong> Call ended without rating</p>'}
-        <p><strong>Phone:</strong> {phone}</p>
-        <p><strong>Call SID:</strong> {call_sid}</p>
-        <p><strong>Session ID:</strong> {session_id or 'N/A'}</p>
-        <p><strong>Duration:</strong> {duration_str}</p>
-        <p><strong>Time:</strong> {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</p>
-        {f'<p><a href="https://vox.finlumina.com/demo/{session_id}">View Dashboard</a></p>' if session_id else ''}
-        <hr>
-        <p><small>Finlumina VOX Demo System</small></p>
+        <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+            <h2 style="color: #2c3e50;">{'🎉 New VOX Demo Feedback!' if rating else '📞 VOX Demo Call Summary'}</h2>
+            
+            <div style="background: #f8f9fa; padding: 20px; border-radius: 8px; margin: 20px 0;">
+                {feedback_html}
+                <p><strong>📱 Phone:</strong> {phone}</p>
+                <p><strong>🆔 Call SID:</strong> <code style="background: #e9ecef; padding: 2px 6px; border-radius: 3px;">{call_sid}</code></p>
+                <p><strong>🔑 Session ID:</strong> {session_id or 'N/A'}</p>
+                <p><strong>⏱️ Duration:</strong> {duration_str}</p>
+                <p><strong>🕐 Time:</strong> {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</p>
+            </div>
+            
+            {f'<p style="text-align: center; margin: 20px 0;"><a href="https://vox.finlumina.com/demo/{session_id}" style="background: #3498db; color: white; padding: 12px 24px; text-decoration: none; border-radius: 5px; display: inline-block;">📊 View Dashboard</a></p>' if session_id else ''}
+            
+            <hr style="border: none; border-top: 1px solid #dee2e6; margin: 30px 0;">
+            
+            <p style="color: #6c757d; font-size: 12px; text-align: center;">
+                <strong>Finlumina VOX Demo System</strong><br>
+                Status: {feedback_status}
+            </p>
+        </div>
         """
         
         params = {
@@ -131,7 +158,7 @@ def send_call_summary_email(call_sid: str, session_id: str = None, phone: str = 
         }
         
         resend.Emails.send(params)
-        Log.info(f"📧 Call summary email sent to {Config.FEEDBACK_EMAIL}")
+        Log.info(f"📧 Call summary email sent to {Config.FEEDBACK_EMAIL} ({feedback_status})")
         
     except Exception as e:
         Log.warning(f"📧 Could not send call summary email: {e}")
@@ -179,15 +206,36 @@ async def handle_incoming_call(request: Request):
         Log.info(f"🎯 Session ID: {session_id}")
         Log.info(f"📊 Dashboard: https://vox.finlumina.com/demo/{session_id}")
         
-        # Return TwiML that speaks URL and waits for key press
+        # Build backend URL
         backend_url = f"https://{request.url.hostname}"
-        twiml = TwilioService.create_demo_intro_twiml(session_id, backend_url)
         
-        return Response(content=twiml, media_type="application/xml")
+        # 🔥 Create response with status callback
+        from twilio.twiml.voice_response import VoiceResponse as TwilioVoiceResponse
+        
+        response = TwilioVoiceResponse()
+        
+        # 🔥 Set status callback to track hangups
+        status_callback_url = f"{backend_url}/call-status"
+        
+        # Get intro TwiML
+        intro_twiml_str = TwilioService.create_demo_intro_twiml(session_id, backend_url)
+        
+        # Parse and merge TwiML with status callback
+        # We need to add statusCallback to the root Response element
+        intro_twiml_str = intro_twiml_str.replace(
+            '<Response>',
+            f'<Response statusCallback="{status_callback_url}" statusCallbackMethod="POST" statusCallbackEvent="completed failed">'
+        )
+        
+        return Response(content=intro_twiml_str, media_type="application/xml")
         
     except Exception as e:
         Log.error(f"Error handling incoming call: {e}")
-        response = VoiceResponse()
+        import traceback
+        Log.error(f"Traceback: {traceback.format_exc()}")
+        
+        from twilio.twiml.voice_response import VoiceResponse as TwilioVoiceResponse
+        response = TwilioVoiceResponse()
         response.say("Error starting demo. Please try again.", voice=TwilioService.TWILIO_VOICE)
         return Response(content=str(response), media_type="application/xml")
 
@@ -269,13 +317,14 @@ async def demo_rating(request: Request):
         if session_data and session_data.get('started_at'):
             duration = int(time.time() - session_data['started_at'])
         
-        # Send email with rating
+        # 🔥 Send email with rating (NOT ended_early)
         send_call_summary_email(
             call_sid=call_sid,
             session_id=session_id,
             phone=from_phone,
             duration_seconds=duration,
-            rating=rating
+            rating=rating,
+            ended_early=False  # 🔥 Has rating, so not early
         )
         
         # Thank user and end call
@@ -284,10 +333,70 @@ async def demo_rating(request: Request):
         
     except Exception as e:
         Log.error(f"Rating handler error: {e}")
-        response = VoiceResponse()
+        from twilio.twiml.voice_response import VoiceResponse as TwilioVoiceResponse
+        response = TwilioVoiceResponse()
         response.say("Thank you. Goodbye!", voice=TwilioService.TWILIO_VOICE)
         response.hangup()
-        return Response(content=str(response), media_type="application/xml")
+        return Response(content=str(response), media_type="application/xml)
+
+@app.api_route("/call-status", methods=["POST"])
+async def handle_call_status(request: Request):
+    """Handle Twilio call status callbacks (hangup tracking)."""
+    try:
+        form_data = await request.form()
+        call_sid = form_data.get('CallSid')
+        call_status = form_data.get('CallStatus')
+        from_phone = form_data.get('From', 'Unknown')
+        call_duration = form_data.get('CallDuration', '0')
+        
+        Log.info(f"📞 [StatusCallback] {call_sid} - {call_status} (duration: {call_duration}s)")
+        
+        # Only process completed/failed calls
+        if call_status in ['completed', 'failed', 'busy', 'no-answer']:
+            # Find session for this call
+            session_id = None
+            phone = from_phone
+            
+            # Check active sessions first
+            for sid, data in demo_sessions.items():
+                if data.get('call_sid') == call_sid:
+                    session_id = sid
+                    phone = data.get('phone', from_phone)
+                    break
+            
+            # Check pending sessions (hung up before pressing key)
+            if not session_id:
+                for sid, data in demo_pending_start.items():
+                    if data.get('call_sid') == call_sid:
+                        session_id = sid
+                        phone = data.get('phone', from_phone)
+                        break
+            
+            # Send email for early hangups
+            try:
+                duration_int = int(call_duration) if call_duration else 0
+            except:
+                duration_int = 0
+            
+            # 🔥 Only send if call was very short (< 55 seconds = ended before demo timer)
+            # This means they hung up early, not completed naturally
+            if duration_int < 55:
+                send_call_summary_email(
+                    call_sid=call_sid,
+                    session_id=session_id,
+                    phone=phone,
+                    duration_seconds=duration_int,
+                    rating=None,
+                    ended_early=True  # 🔥 Flag as early hangup
+                )
+                Log.info(f"📧 Sent early hangup email for {call_sid} ({duration_int}s)")
+        
+        return Response(content="", status_code=200)
+        
+    except Exception as e:
+        Log.error(f"[StatusCallback] Error: {e}")
+        return Response(content="", status_code=200)
+        
 
 @app.get("/api/validate-session/{session_id}")
 async def validate_session(session_id: str):
@@ -1081,11 +1190,13 @@ async def handle_media_stream(websocket: WebSocket):
         Log.error(f"❌ CRITICAL ERROR in media stream handler: {e}")
         import traceback
         Log.error(f"📍 Traceback:\n{traceback.format_exc()}")
+# In the finally block of /media-stream, update this part:
+
     finally:
         Log.info("🧹 Cleaning up media stream...")
         shutdown_flag = True
         
-        # 🔥 NEW: Send call summary email (even if no rating)
+        # 🔥 Send call summary email (call ended during demo, not early)
         if current_call_sid:
             try:
                 # Find session info
@@ -1100,16 +1211,19 @@ async def handle_media_stream(websocket: WebSocket):
                 if demo_start_time:
                     call_duration = int(time.time() - demo_start_time)
                 
-                # Send summary email (without rating - call ended early)
+                # Send summary email (NOT early - they made it to the demo)
                 send_call_summary_email(
                     call_sid=current_call_sid,
                     session_id=session_info.get('session_id') if session_info else None,
                     phone=session_info.get('phone') if session_info else 'Unknown',
                     duration_seconds=call_duration,
-                    rating=None  # No rating - call ended without feedback
+                    rating=None,
+                    ended_early=False  # 🔥 They reached the demo, so not "early"
                 )
             except Exception as e:
                 Log.error(f"Failed to send call summary email: {e}")
+    
+    # ... rest of your existing cleanup code
         
         try:
             await ai_audio_queue.put(None)
