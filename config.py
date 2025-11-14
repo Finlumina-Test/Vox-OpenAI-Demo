@@ -95,7 +95,7 @@ class Config:
         "- Custom enterprise pricing based on call volume and features\n"
         "- White-glove setup and onboarding\n"
         "- Free demo and consultation available\n"
-        "- Contact sales@finlumina.com for quote\n"
+        "- Contact sales@vox.finlumina.com for quote\n"
         "- Visit finlumina.com/vox for more details\n\n"
 
         "🎭 ROLE-PLAY & DEMONSTRATION MODE:\n"
