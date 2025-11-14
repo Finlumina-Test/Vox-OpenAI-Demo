@@ -337,7 +337,7 @@ async def demo_rating(request: Request):
         response = TwilioVoiceResponse()
         response.say("Thank you. Goodbye!", voice=TwilioService.TWILIO_VOICE)
         response.hangup()
-        return Response(content=str(response), media_type="application/xml)
+        return Response(content=str(response), media_type="application/xml")  # ✅ Fixed closing quote
 
 @app.api_route("/call-status", methods=["POST"])
 async def handle_call_status(request: Request):
