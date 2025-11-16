@@ -898,20 +898,20 @@ async def handle_media_stream(websocket: WebSocket):
                 audio_b64 = audio_data.get("audio", "")
                 try:
                     audio_bytes = base64.b64decode(audio_b64)
-                    # 🎵 pcm16 at 24kHz: 24000 samples/sec * 2 bytes/sample = 48000 bytes/sec
-                    duration_seconds = len(audio_bytes) / 48000.0
+                    # 📞 mulaw at 8kHz: 8000 samples/sec * 1 byte/sample = 8000 bytes/sec
+                    duration_seconds = len(audio_bytes) / 8000.0
                 except Exception as e:
                     duration_seconds = 0.02
-                
+
                 ai_currently_speaking = True
-                
+
                 if current_call_sid:
                     broadcast_to_dashboards_nonblocking({
                         "messageType": "audio",
                         "speaker": "AI",
                         "audio": audio_b64,
-                        "format": "pcm16",      # 🎵 High quality pcm16 from OpenAI
-                        "sampleRate": 24000,    # 🎵 24kHz
+                        "format": "mulaw",      # 📞 Mulaw from OpenAI (frontend upsamples)
+                        "sampleRate": 8000,     # 📞 8kHz
                         "timestamp": audio_data.get("timestamp", int(time.time() * 1000)),
                         "callSid": current_call_sid,
                     }, current_call_sid)

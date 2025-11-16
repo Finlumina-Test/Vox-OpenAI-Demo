@@ -87,9 +87,9 @@ class AudioFormatConverter:
     """
     
     # Audio format constants
-    OPENAI_INPUT_FORMAT = "audio/pcmu"   # 📞 Mulaw 8kHz from Twilio (pass-through)
-    OPENAI_OUTPUT_FORMAT = "audio/pcm16"  # 🎵 High quality 16-bit PCM at 24kHz from OpenAI
-    TWILIO_OUTPUT_FORMAT = "audio/pcmu"   # 📞 Mulaw 8kHz for Twilio phone calls (converted from pcm16)
+    OPENAI_INPUT_FORMAT = "audio/pcmu"   # 📞 Mulaw 8kHz from Twilio
+    OPENAI_OUTPUT_FORMAT = "audio/pcmu"  # 📞 Mulaw 8kHz from OpenAI (same as input)
+    TWILIO_OUTPUT_FORMAT = "audio/pcmu"  # 📞 Mulaw 8kHz for Twilio phone calls
     
     @staticmethod
     def twilio_to_openai(twilio_payload: str) -> str:
@@ -108,29 +108,16 @@ class AudioFormatConverter:
     @staticmethod
     def openai_to_twilio(openai_delta: str) -> str:
         """
-        Convert OpenAI audio delta (pcm16 24kHz) to Twilio format (mulaw 8kHz).
+        Convert OpenAI audio delta to Twilio-compatible format.
 
         Args:
-            openai_delta: Base64 encoded pcm16 24kHz audio from OpenAI
+            openai_delta: Base64 encoded mulaw 8kHz audio from OpenAI
 
         Returns:
-            Base64 encoded mulaw 8kHz audio for Twilio phone calls
+            Base64 encoded mulaw 8kHz audio for Twilio (pass-through)
         """
-        try:
-            # Decode base64 to get pcm16 bytes
-            pcm16_data = base64.b64decode(openai_delta)
-
-            # Convert pcm16 24kHz → mulaw 8kHz
-            mulaw_data = MuLawConverter.pcm16_to_mulaw(pcm16_data, input_rate=24000, output_rate=8000)
-
-            # Encode back to base64
-            return base64.b64encode(mulaw_data).decode('utf-8')
-
-        except Exception as e:
-            # If conversion fails, return original (fallback)
-            from services.log_utils import Log
-            Log.error(f"[AudioConvert] OpenAI→Twilio conversion failed: {e}")
-            return openai_delta
+        # Both use mulaw 8kHz, so pass through as-is
+        return openai_delta
     
     @staticmethod
     def validate_audio_payload(payload: str) -> bool:
