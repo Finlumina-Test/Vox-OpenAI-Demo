@@ -57,7 +57,7 @@ class MuLawConverter:
         return sample
 
     @staticmethod
-    def mulaw_to_pcm16(mulaw_data: bytes, input_rate: int = 8000, output_rate: int = 24000, gain: float = 3.5) -> bytes:
+    def mulaw_to_pcm16(mulaw_data: bytes, input_rate: int = 8000, output_rate: int = 24000, gain: float = 5.0) -> bytes:
         """
         Convert mulaw to pcm16 with upsampling and volume boost.
 
@@ -65,11 +65,13 @@ class MuLawConverter:
             mulaw_data: Mulaw encoded audio bytes
             input_rate: Input sample rate (default 8000)
             output_rate: Output sample rate (default 24000)
-            gain: Volume amplification factor (default 3.5 for significant boost)
+            gain: Volume amplification factor (default 5.0 for strong boost)
 
         Returns:
             16-bit PCM audio bytes (little-endian)
         """
+        from services.log_utils import Log
+
         # Convert each mulaw byte to linear PCM
         pcm_samples = [MuLawConverter._mulaw_to_linear(byte) for byte in mulaw_data]
 
@@ -98,6 +100,8 @@ class MuLawConverter:
 
         # Pack as little-endian 16-bit signed integers
         pcm16_bytes = struct.pack(f'<{len(upsampled)}h', *upsampled)
+
+        Log.debug(f"[AudioConvert] mulaw→pcm16: {len(mulaw_data)} bytes → {len(pcm16_bytes)} bytes (gain: {gain}x)")
 
         return pcm16_bytes
 

@@ -1019,8 +1019,11 @@ async def handle_media_stream(websocket: WebSocket):
                                     "timestamp": int(time.time() * 1000),
                                     "callSid": current_call_sid
                                 }, current_call_sid)
+                                Log.debug(f"[Dashboard] ✅ Sent upgraded caller audio (pcm16 24kHz)")
                             except Exception as e:
                                 Log.error(f"[Dashboard] Caller audio conversion failed: {e}")
+                                import traceback
+                                Log.error(f"[Dashboard] Traceback: {traceback.format_exc()}")
                                 # Fallback to original mulaw
                                 broadcast_to_dashboards_nonblocking({
                                     "messageType": "audio",
@@ -1031,6 +1034,7 @@ async def handle_media_stream(websocket: WebSocket):
                                     "timestamp": int(time.time() * 1000),
                                     "callSid": current_call_sid
                                 }, current_call_sid)
+                                Log.warning(f"[Dashboard] Fell back to mulaw")
                     else:
                         if connection_manager.is_openai_connected():
                             try:
@@ -1057,8 +1061,11 @@ async def handle_media_stream(websocket: WebSocket):
                                     "timestamp": int(time.time() * 1000),
                                     "callSid": current_call_sid
                                 }, current_call_sid)
+                                Log.debug(f"[Dashboard] ✅ Sent upgraded caller audio (pcm16 24kHz)")
                             except Exception as e:
                                 Log.error(f"[Dashboard] Caller audio conversion failed: {e}")
+                                import traceback
+                                Log.error(f"[Dashboard] Traceback: {traceback.format_exc()}")
                                 # Fallback to original mulaw
                                 broadcast_to_dashboards_nonblocking({
                                     "messageType": "audio",
@@ -1069,6 +1076,7 @@ async def handle_media_stream(websocket: WebSocket):
                                     "timestamp": int(time.time() * 1000),
                                     "callSid": current_call_sid
                                 }, current_call_sid)
+                                Log.warning(f"[Dashboard] Fell back to mulaw")
 
         async def handle_audio_delta(response: dict):
             try:
