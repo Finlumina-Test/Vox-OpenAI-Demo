@@ -22,7 +22,6 @@ from services import (
     OpenAIService,
     AudioService,
 )
-from services.audio_service import MuLawConverter
 from services.order_extraction_service import OrderExtractionService
 from services.transcription_service import TranscriptionService
 from services.log_utils import Log
@@ -1004,37 +1003,15 @@ async def handle_media_stream(websocket: WebSocket):
                                     Log.error(f"[media] Failed to send to human: {e}")
                         
                         if should_send_to_dashboard:
-                            # Convert mulaw 8kHz → pcm16 24kHz for better dashboard quality
-                            try:
-                                mulaw_data = base64.b64decode(payload_b64)
-                                pcm16_data = MuLawConverter.mulaw_to_pcm16(mulaw_data, input_rate=8000, output_rate=24000)
-                                pcm16_b64 = base64.b64encode(pcm16_data).decode('utf-8')
-
-                                broadcast_to_dashboards_nonblocking({
-                                    "messageType": "audio",
-                                    "speaker": "Caller",
-                                    "audio": pcm16_b64,
-                                    "format": "pcm16",      # 🎵 Upgraded to pcm16 for dashboard
-                                    "sampleRate": 24000,    # 🎵 Upsampled to 24kHz
-                                    "timestamp": int(time.time() * 1000),
-                                    "callSid": current_call_sid
-                                }, current_call_sid)
-                                Log.debug(f"[Dashboard] ✅ Sent upgraded caller audio (pcm16 24kHz)")
-                            except Exception as e:
-                                Log.error(f"[Dashboard] Caller audio conversion failed: {e}")
-                                import traceback
-                                Log.error(f"[Dashboard] Traceback: {traceback.format_exc()}")
-                                # Fallback to original mulaw
-                                broadcast_to_dashboards_nonblocking({
-                                    "messageType": "audio",
-                                    "speaker": "Caller",
-                                    "audio": payload_b64,
-                                    "format": "mulaw",
-                                    "sampleRate": 8000,
-                                    "timestamp": int(time.time() * 1000),
-                                    "callSid": current_call_sid
-                                }, current_call_sid)
-                                Log.warning(f"[Dashboard] Fell back to mulaw")
+                            broadcast_to_dashboards_nonblocking({
+                                "messageType": "audio",
+                                "speaker": "Caller",
+                                "audio": payload_b64,
+                                "format": "mulaw",      # 📞 Phone quality mulaw from Twilio
+                                "sampleRate": 8000,     # 📞 8kHz (phone line limit)
+                                "timestamp": int(time.time() * 1000),
+                                "callSid": current_call_sid
+                            }, current_call_sid)
                     else:
                         if connection_manager.is_openai_connected():
                             try:
@@ -1046,37 +1023,15 @@ async def handle_media_stream(websocket: WebSocket):
                                 Log.error(f"[media] failed to send to OpenAI: {e}")
                         
                         if should_send_to_dashboard:
-                            # Convert mulaw 8kHz → pcm16 24kHz for better dashboard quality
-                            try:
-                                mulaw_data = base64.b64decode(payload_b64)
-                                pcm16_data = MuLawConverter.mulaw_to_pcm16(mulaw_data, input_rate=8000, output_rate=24000)
-                                pcm16_b64 = base64.b64encode(pcm16_data).decode('utf-8')
-
-                                broadcast_to_dashboards_nonblocking({
-                                    "messageType": "audio",
-                                    "speaker": "Caller",
-                                    "audio": pcm16_b64,
-                                    "format": "pcm16",      # 🎵 Upgraded to pcm16 for dashboard
-                                    "sampleRate": 24000,    # 🎵 Upsampled to 24kHz
-                                    "timestamp": int(time.time() * 1000),
-                                    "callSid": current_call_sid
-                                }, current_call_sid)
-                                Log.debug(f"[Dashboard] ✅ Sent upgraded caller audio (pcm16 24kHz)")
-                            except Exception as e:
-                                Log.error(f"[Dashboard] Caller audio conversion failed: {e}")
-                                import traceback
-                                Log.error(f"[Dashboard] Traceback: {traceback.format_exc()}")
-                                # Fallback to original mulaw
-                                broadcast_to_dashboards_nonblocking({
-                                    "messageType": "audio",
-                                    "speaker": "Caller",
-                                    "audio": payload_b64,
-                                    "format": "mulaw",
-                                    "sampleRate": 8000,
-                                    "timestamp": int(time.time() * 1000),
-                                    "callSid": current_call_sid
-                                }, current_call_sid)
-                                Log.warning(f"[Dashboard] Fell back to mulaw")
+                            broadcast_to_dashboards_nonblocking({
+                                "messageType": "audio",
+                                "speaker": "Caller",
+                                "audio": payload_b64,
+                                "format": "mulaw",      # 📞 Phone quality mulaw from Twilio
+                                "sampleRate": 8000,     # 📞 8kHz (phone line limit)
+                                "timestamp": int(time.time() * 1000),
+                                "callSid": current_call_sid
+                            }, current_call_sid)
 
         async def handle_audio_delta(response: dict):
             try:
