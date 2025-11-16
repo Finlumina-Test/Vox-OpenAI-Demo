@@ -361,7 +361,7 @@ async def demo_rating(request: Request):
         response = TwilioVoiceResponse()
         response.say("Thank you. Goodbye!", voice=TwilioService.TWILIO_VOICE)
         response.hangup()
-        return Response(content=str(response), media_type="application/xml")  # ✅ Fixed closing quote
+        return Response(content=str(response), media_type="application/xml")
 
 @app.api_route("/call-status", methods=["POST"])
 async def handle_call_status(request: Request):
@@ -647,10 +647,13 @@ async def handle_takeover(request: Request):
             return JSONResponse({"error": "Call not found"}, status_code=404)
         
         call_data = active_calls[call_sid]
+        stored_restaurant_id = call_data.get("restaurant_id", "default")
         
-        if restaurant_id and call_data.get("restaurant_id") != restaurant_id:
-            Log.error(f"[Takeover] Restaurant ID mismatch: expected {call_data.get('restaurant_id')}, got {restaurant_id}")
-            return JSONResponse({"error": "Restaurant ID mismatch"}, status_code=403)
+        # 🔥 FIX: Allow 'demo' to match 'default' for demo calls
+        if restaurant_id and restaurant_id != stored_restaurant_id:
+            if not (restaurant_id == "demo" and stored_restaurant_id == "default"):
+                Log.error(f"[Takeover] Restaurant ID mismatch: expected {stored_restaurant_id}, got {restaurant_id}")
+                return JSONResponse({"error": "Restaurant ID mismatch"}, status_code=403)
         
         openai_service = call_data.get("openai_service")
         connection_manager = call_data.get("connection_manager")
@@ -742,9 +745,13 @@ async def handle_end_call(request: Request):
             Log.warning(f"[EndCall] Call {call_sid} not in active_calls (might have ended)")
         else:
             call_data = active_calls[call_sid]
-            if restaurant_id and call_data.get("restaurant_id") != restaurant_id:
-                Log.error(f"[EndCall] Restaurant ID mismatch: expected {call_data.get('restaurant_id')}, got {restaurant_id}")
-                return JSONResponse({"error": "Restaurant ID mismatch"}, status_code=403)
+            stored_restaurant_id = call_data.get("restaurant_id", "default")
+            
+            # 🔥 FIX: Allow 'demo' to match 'default' for demo calls
+            if restaurant_id and restaurant_id != stored_restaurant_id:
+                if not (restaurant_id == "demo" and stored_restaurant_id == "default"):
+                    Log.error(f"[EndCall] Restaurant ID mismatch: expected {stored_restaurant_id}, got {restaurant_id}")
+                    return JSONResponse({"error": "Restaurant ID mismatch"}, status_code=403)
             
             openai_service = call_data.get("openai_service")
             if openai_service and openai_service.is_human_in_control():
@@ -1243,7 +1250,6 @@ async def handle_media_stream(websocket: WebSocket):
         Log.error(f"❌ CRITICAL ERROR in media stream handler: {e}")
         import traceback
         Log.error(f"📍 Traceback:\n{traceback.format_exc()}")
-# In the finally block of /media-stream, update this part:
 
     finally:
         Log.info("🧹 Cleaning up media stream...")
@@ -1275,8 +1281,6 @@ async def handle_media_stream(websocket: WebSocket):
                 )
             except Exception as e:
                 Log.error(f"Failed to send call summary email: {e}")
-    
-    # ... rest of your existing cleanup code
         
         try:
             await ai_audio_queue.put(None)
