@@ -41,6 +41,63 @@ class MuLawConverter:
         return mulaw_byte & 0xFF
 
     @staticmethod
+    def _mulaw_to_linear(mulaw_byte: int) -> int:
+        """Convert a single mulaw byte to 16-bit linear PCM sample."""
+        mulaw_byte = ~mulaw_byte
+        sign = mulaw_byte & 0x80
+        exponent = (mulaw_byte >> 4) & 0x07
+        mantissa = mulaw_byte & 0x0F
+
+        sample = ((mantissa << 3) + MuLawConverter.MULAW_BIAS) << exponent
+        sample -= MuLawConverter.MULAW_BIAS
+
+        if sign:
+            sample = -sample
+
+        return sample
+
+    @staticmethod
+    def mulaw_to_pcm16(mulaw_data: bytes, input_rate: int = 8000, output_rate: int = 24000) -> bytes:
+        """
+        Convert mulaw to pcm16 with upsampling.
+
+        Args:
+            mulaw_data: Mulaw encoded audio bytes
+            input_rate: Input sample rate (default 8000)
+            output_rate: Output sample rate (default 24000)
+
+        Returns:
+            16-bit PCM audio bytes (little-endian)
+        """
+        # Convert each mulaw byte to linear PCM
+        pcm_samples = [MuLawConverter._mulaw_to_linear(byte) for byte in mulaw_data]
+
+        # Upsample using linear interpolation (8kHz → 24kHz = 3x)
+        upsample_factor = output_rate // input_rate  # 24000 // 8000 = 3
+
+        upsampled = []
+        for i in range(len(pcm_samples) - 1):
+            current = pcm_samples[i]
+            next_sample = pcm_samples[i + 1]
+
+            # Add current sample
+            upsampled.append(current)
+
+            # Add interpolated samples
+            for j in range(1, upsample_factor):
+                interpolated = current + (next_sample - current) * j // upsample_factor
+                upsampled.append(interpolated)
+
+        # Add last sample
+        if pcm_samples:
+            upsampled.append(pcm_samples[-1])
+
+        # Pack as little-endian 16-bit signed integers
+        pcm16_bytes = struct.pack(f'<{len(upsampled)}h', *upsampled)
+
+        return pcm16_bytes
+
+    @staticmethod
     def pcm16_to_mulaw(pcm16_data: bytes, input_rate: int = 24000, output_rate: int = 8000) -> bytes:
         """
         Convert pcm16 to mulaw with downsampling.
