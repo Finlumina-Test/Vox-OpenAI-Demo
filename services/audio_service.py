@@ -1,7 +1,70 @@
 import base64
+import struct
 from typing import Optional, Dict, Any, Tuple
 from dataclasses import dataclass
 from config import Config
+
+
+class MuLawConverter:
+    """
+    Python 3.13 compatible mulaw conversion (no audioop dependency).
+    Implements ITU-T G.711 mulaw encoding/decoding.
+    """
+
+    # Mulaw compression constants
+    MULAW_BIAS = 0x84
+    MULAW_MAX = 0x1FFF
+
+    @staticmethod
+    def _linear_to_mulaw(sample: int) -> int:
+        """Convert a single 16-bit linear PCM sample to mulaw."""
+        # Get the sign bit
+        sign = (sample >> 8) & 0x80
+        if sign:
+            sample = -sample
+        if sample > MuLawConverter.MULAW_MAX:
+            sample = MuLawConverter.MULAW_MAX
+
+        # Add bias
+        sample = sample + MuLawConverter.MULAW_BIAS
+
+        # Find exponent and mantissa
+        exponent = 7
+        for exp in range(7, -1, -1):
+            if sample >= (1 << (exp + 3)):
+                exponent = exp
+                break
+
+        mantissa = (sample >> (exponent + 3)) & 0x0F
+        mulaw_byte = ~(sign | (exponent << 4) | mantissa)
+
+        return mulaw_byte & 0xFF
+
+    @staticmethod
+    def pcm16_to_mulaw(pcm16_data: bytes, input_rate: int = 24000, output_rate: int = 8000) -> bytes:
+        """
+        Convert pcm16 to mulaw with downsampling.
+
+        Args:
+            pcm16_data: 16-bit PCM audio bytes (little-endian)
+            input_rate: Input sample rate (default 24000)
+            output_rate: Output sample rate (default 8000)
+
+        Returns:
+            Mulaw encoded audio bytes
+        """
+        # Unpack 16-bit samples (little-endian signed integers)
+        num_samples = len(pcm16_data) // 2
+        samples = struct.unpack(f'<{num_samples}h', pcm16_data)
+
+        # Downsample (simple decimation - take every Nth sample)
+        downsample_factor = input_rate // output_rate  # 24000 // 8000 = 3
+        downsampled = samples[::downsample_factor]
+
+        # Convert each sample to mulaw
+        mulaw_bytes = bytes([MuLawConverter._linear_to_mulaw(s) for s in downsampled])
+
+        return mulaw_bytes
 
 
 @dataclass
@@ -26,7 +89,7 @@ class AudioFormatConverter:
     # Audio format constants
     OPENAI_INPUT_FORMAT = "audio/pcmu"   # 📞 Mulaw 8kHz from Twilio (pass-through)
     OPENAI_OUTPUT_FORMAT = "audio/pcm16"  # 🎵 High quality 16-bit PCM at 24kHz from OpenAI
-    TWILIO_FORMAT = "audio/pcmu"   # 📞 Phone quality mulaw 8kHz
+    TWILIO_OUTPUT_FORMAT = "audio/pcmu"   # 📞 Mulaw 8kHz for Twilio phone calls (converted from pcm16)
     
     @staticmethod
     def twilio_to_openai(twilio_payload: str) -> str:
@@ -45,16 +108,29 @@ class AudioFormatConverter:
     @staticmethod
     def openai_to_twilio(openai_delta: str) -> str:
         """
-        Convert OpenAI audio delta to Twilio-compatible format.
+        Convert OpenAI audio delta (pcm16 24kHz) to Twilio format (mulaw 8kHz).
 
         Args:
             openai_delta: Base64 encoded pcm16 24kHz audio from OpenAI
 
         Returns:
-            Base64 encoded pcm16 24kHz audio (Twilio accepts pcm16, so pass through)
+            Base64 encoded mulaw 8kHz audio for Twilio phone calls
         """
-        # Twilio accepts pcm16 24kHz, so pass through as-is
-        return openai_delta
+        try:
+            # Decode base64 to get pcm16 bytes
+            pcm16_data = base64.b64decode(openai_delta)
+
+            # Convert pcm16 24kHz → mulaw 8kHz
+            mulaw_data = MuLawConverter.pcm16_to_mulaw(pcm16_data, input_rate=24000, output_rate=8000)
+
+            # Encode back to base64
+            return base64.b64encode(mulaw_data).decode('utf-8')
+
+        except Exception as e:
+            # If conversion fails, return original (fallback)
+            from services.log_utils import Log
+            Log.error(f"[AudioConvert] OpenAI→Twilio conversion failed: {e}")
+            return openai_delta
     
     @staticmethod
     def validate_audio_payload(payload: str) -> bool:
@@ -282,7 +358,7 @@ class AudioService:
             item_id=item_id,
             stream_id=stream_id,
             payload=converted_payload,
-            format_type=self.format_converter.OPENAI_OUTPUT_FORMAT  # pcm16 24kHz from OpenAI
+            format_type=self.format_converter.TWILIO_OUTPUT_FORMAT  # mulaw 8kHz for Twilio (converted)
         )
         
         # Add to buffer
