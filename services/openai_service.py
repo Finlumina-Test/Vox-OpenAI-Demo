@@ -134,7 +134,7 @@ class OpenAISessionManager:
 
                 "audio": {
                     "input": {
-                        "format": {"type": "audio/pcm16"},  # 🎵 High quality 16-bit PCM at 24kHz
+                        "format": {"type": "audio/pcmu"},  # 📞 Accept mulaw 8kHz from Twilio (no conversion needed)
                         "turn_detection": {
                             "type": "server_vad",
                             "threshold": 0.4,  # 🔥 More aggressive (lower = triggers easier)
@@ -145,7 +145,7 @@ class OpenAISessionManager:
                             "model": "whisper-1",
                         }
                     },
-                    "output": {"format": {"type": "audio/pcm16"}}  # 🎵 High quality 16-bit PCM at 24kHz
+                    "output": {"format": {"type": "audio/pcm16"}}  # 🎵 High quality 16-bit PCM at 24kHz for AI
                 },
 
                 "instructions": (

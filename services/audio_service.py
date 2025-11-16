@@ -1,5 +1,4 @@
 import base64
-import audioop
 from typing import Optional, Dict, Any, Tuple
 from dataclasses import dataclass
 from config import Config
@@ -25,60 +24,36 @@ class AudioFormatConverter:
     """
     
     # Audio format constants
-    OPENAI_FORMAT = "audio/pcm16"   # 🎵 High quality 16-bit PCM at 24kHz
-    TWILIO_INPUT_FORMAT = "audio/pcmu"   # 📞 Phone quality mulaw 8kHz (from phone line)
-    TWILIO_OUTPUT_FORMAT = "audio/pcm16"  # 🎵 High quality pcm16 24kHz (AI to caller)
+    OPENAI_INPUT_FORMAT = "audio/pcmu"   # 📞 Mulaw 8kHz from Twilio (pass-through)
+    OPENAI_OUTPUT_FORMAT = "audio/pcm16"  # 🎵 High quality 16-bit PCM at 24kHz from OpenAI
+    TWILIO_FORMAT = "audio/pcmu"   # 📞 Phone quality mulaw 8kHz
     
     @staticmethod
     def twilio_to_openai(twilio_payload: str) -> str:
         """
-        Convert Twilio audio payload (mulaw 8kHz) to OpenAI format (pcm16 24kHz).
+        Convert Twilio audio payload to OpenAI-compatible format.
 
         Args:
             twilio_payload: Base64 encoded mulaw 8kHz audio from Twilio
 
         Returns:
-            Base64 encoded pcm16 24kHz audio for OpenAI
+            Audio payload formatted for OpenAI (mulaw 8kHz pass-through)
         """
-        try:
-            # Decode base64 to get mulaw bytes
-            mulaw_data = base64.b64decode(twilio_payload)
-
-            # Convert mulaw to linear PCM (16-bit)
-            pcm_8khz = audioop.ulaw2lin(mulaw_data, 2)  # 2 = 16-bit samples
-
-            # Upsample from 8kHz to 24kHz (3x upsampling)
-            pcm_24khz, _ = audioop.ratecv(
-                pcm_8khz,      # Input audio data
-                2,             # Sample width (2 bytes = 16-bit)
-                1,             # Number of channels (mono)
-                8000,          # Input sample rate
-                24000,         # Output sample rate (3x upsampling)
-                None           # No state (for first call)
-            )
-
-            # Encode to base64 and return
-            return base64.b64encode(pcm_24khz).decode('utf-8')
-
-        except Exception as e:
-            # If conversion fails, return original (fallback)
-            from services.log_utils import Log
-            Log.error(f"[AudioConvert] Twilio→OpenAI conversion failed: {e}")
-            return twilio_payload
+        # Both use mulaw 8kHz, so pass through as-is
+        return twilio_payload
     
     @staticmethod
     def openai_to_twilio(openai_delta: str) -> str:
         """
-        Convert OpenAI audio delta (pcm16 24kHz) to Twilio format.
+        Convert OpenAI audio delta to Twilio-compatible format.
 
         Args:
             openai_delta: Base64 encoded pcm16 24kHz audio from OpenAI
 
         Returns:
-            Base64 encoded audio for Twilio (Twilio accepts pcm16, so pass through)
+            Base64 encoded pcm16 24kHz audio (Twilio accepts pcm16, so pass through)
         """
-        # Twilio accepts pcm16, so just return as-is
-        # No conversion needed!
+        # Twilio accepts pcm16 24kHz, so pass through as-is
         return openai_delta
     
     @staticmethod
@@ -264,7 +239,7 @@ class AudioService:
         metadata = AudioMetadata(
             timestamp=timestamp,
             payload=converted_payload,
-            format_type=self.format_converter.OPENAI_FORMAT
+            format_type=self.format_converter.OPENAI_INPUT_FORMAT
         )
         
         # Add to buffer
@@ -307,7 +282,7 @@ class AudioService:
             item_id=item_id,
             stream_id=stream_id,
             payload=converted_payload,
-            format_type=self.format_converter.TWILIO_OUTPUT_FORMAT  # pcm16 24kHz to Twilio
+            format_type=self.format_converter.OPENAI_OUTPUT_FORMAT  # pcm16 24kHz from OpenAI
         )
         
         # Add to buffer
