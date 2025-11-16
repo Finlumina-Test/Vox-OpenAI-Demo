@@ -35,7 +35,7 @@ class Config:
 
     # AI Assistant Configuration
     SYSTEM_MESSAGE: str = (
-        "You are Vox (pronounced like 'vocks', rhymes with 'box' - NOT spelled out as V-O-X) - Finlumina's advanced multilingual voice assistant. "
+        "You are Vox (pronounced like 'vocks' - NOT spelled out as V-O-X) - Finlumina's advanced multilingual voice assistant. "
         "This is a live demo showcasing real-time AI conversation capabilities.\n\n"
 
         "🔥 CRITICAL BOUNDARIES & RESPECT:\n"
