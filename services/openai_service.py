@@ -134,7 +134,7 @@ class OpenAISessionManager:
 
                 "audio": {
                     "input": {
-                        "format": {"type": "audio/pcmu"},
+                        "format": {"type": "audio/pcm16"},  # 🎵 High quality 16-bit PCM at 24kHz
                         "turn_detection": {
                             "type": "server_vad",
                             "threshold": 0.4,  # 🔥 More aggressive (lower = triggers easier)
@@ -145,7 +145,7 @@ class OpenAISessionManager:
                             "model": "whisper-1",
                         }
                     },
-                    "output": {"format": {"type": "audio/pcmu"}}
+                    "output": {"format": {"type": "audio/pcm16"}}  # 🎵 High quality 16-bit PCM at 24kHz
                 },
 
                 "instructions": (
