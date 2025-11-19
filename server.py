@@ -363,10 +363,46 @@ async def demo_rating(request: Request):
         response.hangup()
         return Response(content=str(response), media_type="application/xml")
 
-@app.api_route("/call-status", methods=["POST"])
+@app.api_route("/call-status", methods=["GET", "POST"])
 async def handle_call_status(request: Request):
-    """Handle Twilio call status callbacks (hangup tracking)."""
+    """
+    Handle call status:
+    - GET: Frontend check if call has ended (returns JSON)
+    - POST: Twilio status callback (hangup tracking)
+    """
     try:
+        # GET request from frontend - check if call has ended
+        if request.method == "GET":
+            call_sid = request.query_params.get('callSid')
+
+            if not call_sid:
+                return JSONResponse({"error": "Missing callSid parameter"}, status_code=400)
+
+            # Check if call is still active in active_calls
+            is_active = call_sid in active_calls
+
+            # Check if call ended (exists in demo_sessions but not in active_calls)
+            session_data = None
+            for sid, data in demo_sessions.items():
+                if data.get('call_sid') == call_sid:
+                    session_data = data
+                    break
+
+            # Also check pending sessions
+            if not session_data:
+                for sid, data in demo_pending_start.items():
+                    if data.get('call_sid') == call_sid:
+                        session_data = data
+                        break
+
+            return JSONResponse({
+                "callSid": call_sid,
+                "isActive": is_active,
+                "hasEnded": not is_active and session_data is not None,
+                "exists": session_data is not None
+            })
+
+        # POST request from Twilio - status callback
         Log.info("=" * 80)
         Log.info("🔥 CALL STATUS CALLBACK RECEIVED")
         Log.info("=" * 80)
