@@ -384,6 +384,9 @@ class OpenAIService:
         """
         Send human agent audio to OpenAI for transcription/context.
         This keeps OpenAI aware of the conversation even during human takeover.
+
+        Audio is appended to buffer - OpenAI's server VAD will auto-commit
+        when it detects speech (no manual commit needed).
         """
         try:
             if connection_manager.is_openai_connected():
@@ -391,13 +394,8 @@ class OpenAIService:
                     "type": "input_audio_buffer.append",
                     "audio": audio_base64
                 })
-                
-                # ✅ Manually commit the audio for transcription
-                await connection_manager.send_to_openai({
-                    "type": "input_audio_buffer.commit"
-                })
-                
-                Log.debug("[HumanAudio] Sent to OpenAI for transcription")
+
+                Log.debug("[HumanAudio] Audio chunk appended (VAD will auto-commit)")
         except Exception as e:
             Log.error(f"Failed to send human audio to OpenAI: {e}")
 
