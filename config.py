@@ -30,6 +30,11 @@ class Config:
     RESEND_API_KEY: str | None = os.getenv('RESEND_API_KEY')
     FEEDBACK_EMAIL: str = os.getenv('FEEDBACK_EMAIL', 'faizan@finlumina.com')
 
+    # Supabase Configuration
+    SUPABASE_URL: str | None = os.getenv('SUPABASE_URL')
+    SUPABASE_KEY: str | None = os.getenv('SUPABASE_KEY')
+    SUPABASE_TABLE: str = os.getenv('SUPABASE_TABLE', 'call_recordings')
+
     # Demo Configuration
     DEMO_DURATION_SECONDS: int = int(os.getenv('DEMO_DURATION_SECONDS', '60'))
 
@@ -201,6 +206,10 @@ class Config:
     @classmethod
     def has_email_configured(cls) -> bool:
         return bool(cls.RESEND_API_KEY)
+
+    @classmethod
+    def has_supabase_configured(cls) -> bool:
+        return bool(cls.SUPABASE_URL and cls.SUPABASE_KEY)
 
 
 # Initialize and validate
