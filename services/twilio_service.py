@@ -84,13 +84,23 @@ class TwilioService:
         return str(response)
     
     @staticmethod
-    def create_demo_start_twiml(backend_host: str, skipped: bool = False) -> str:
+    def create_demo_start_twiml(backend_host: str, skipped: bool = False, call_sid: str = None) -> str:
         """
         TwiML to start OpenAI media stream after key press.
         🔥 Different message if user skipped the intro
+        🎙️ Records the entire call automatically
         """
         response = VoiceResponse()
-        
+
+        # 🎙️ Start recording the call
+        response.record(
+            recording_status_callback=f'https://{backend_host}/recording-status',
+            recording_status_callback_method='POST',
+            recording_status_callback_event='completed',
+            max_length=3600,  # Max 1 hour
+            transcribe=False,  # We don't need Twilio transcription (have OpenAI)
+        )
+
         if skipped:
             response.say(
                 "Skipping to demo. Connecting you now.",
@@ -101,12 +111,12 @@ class TwilioService:
                 "Great! Starting your demo now. You have one minute.",
                 voice=TwilioService.TWILIO_VOICE
             )
-        
+
         # Connect to media stream
         connect = Connect()
         connect.stream(url=f'wss://{backend_host}/media-stream')
         response.append(connect)
-        
+
         return str(response)
     
     @staticmethod
