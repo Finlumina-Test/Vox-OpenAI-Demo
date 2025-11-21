@@ -504,7 +504,7 @@ async def notify_frontend_audio_upload(call_sid: str, audio_url: str, retry_coun
     Args:
         call_sid: Twilio call SID
         audio_url: Public URL to the audio file in Supabase Storage
-        retry_count: Current retry attempt (max 5 retries = 6 total attempts)
+        retry_count: Current retry attempt (max 9 retries = 10 total attempts)
 
     Returns:
         True if notification successful, False otherwise
@@ -536,10 +536,10 @@ async def notify_frontend_audio_upload(call_sid: str, audio_url: str, retry_coun
             if response.status_code == 404:
                 try:
                     data = response.json()
-                    if data.get("retry") and retry_count < 5:  # Max 6 attempts (0-5)
+                    if data.get("retry") and retry_count < 9:  # Max 10 attempts (0-9)
                         retry_after_ms = data.get("retry_after", 1000)  # Default 1 second
                         retry_after_sec = retry_after_ms / 1000
-                        Log.info(f"⏳ Call not found yet (attempt {retry_count + 1}/6), waiting {retry_after_sec}s...")
+                        Log.info(f"⏳ Call not found yet (attempt {retry_count + 1}/10), waiting {retry_after_sec}s...")
                         await asyncio.sleep(retry_after_sec)
                         return await notify_frontend_audio_upload(call_sid, audio_url, retry_count + 1)
                     else:
