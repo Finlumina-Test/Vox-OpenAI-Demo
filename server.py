@@ -641,25 +641,15 @@ async def handle_recording_status(request: Request):
                     public_url = supabase.storage.from_(Config.SUPABASE_BUCKET).get_public_url(file_name)
                     Log.info(f"🔗 Public URL: {public_url}")
 
-                    # Step 4: Store metadata in database with Supabase Storage URL
-                    recording_data = {
-                        'call_sid': call_sid,
-                        'restaurant_id': session_data.get('restaurant_id', 'demo') if session_data else 'demo',
-                        'phone_number': session_data.get('phone') if session_data else None,
-                        'call_duration': int(recording_duration) if recording_duration else 0,
-                        'audio_url': public_url,  # Supabase Storage URL (permanent)
-                        'transcript': [],  # Initialize empty, can be updated later
-                        'order_items': [],  # Initialize empty, can be populated from conversation
-                    }
+                    # Step 4: Update only audio_url in database (don't touch other fields)
+                    from datetime import datetime
 
-                    # Upsert into Supabase database (insert or update if call_sid exists)
-                    # This handles the case where multiple recordings exist for the same call
-                    result = supabase.table(Config.SUPABASE_TABLE).upsert(
-                        recording_data,
-                        on_conflict='call_sid'  # Use call_sid as the unique key
-                    ).execute()
+                    result = supabase.table(Config.SUPABASE_TABLE).update({
+                        'audio_url': public_url,
+                        'updated_at': datetime.utcnow().isoformat()
+                    }).eq('call_sid', call_sid).execute()
 
-                    Log.info(f"✅ Recording metadata stored in database: {recording_sid}")
+                    Log.info(f"✅ Recording audio URL updated in database: {recording_sid}")
                     Log.info(f"📊 Database response: {result}")
 
                     # Notify frontend that audio URL is available (with retry handling)
