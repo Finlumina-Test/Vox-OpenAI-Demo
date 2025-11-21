@@ -487,6 +487,66 @@ async def handle_call_status(request: Request):
         return Response(content="ERROR", status_code=200)
 
 
+async def notify_frontend_audio_upload(call_sid: str, audio_url: str, retry_count: int = 0) -> bool:
+    """
+    Notify frontend that audio URL is available with retry handling for race conditions.
+
+    Args:
+        call_sid: Twilio call SID
+        audio_url: Public URL to the audio file in Supabase Storage
+        retry_count: Current retry attempt (max 2 retries = 3 total attempts)
+
+    Returns:
+        True if notification successful, False otherwise
+    """
+    if not Config.FRONTEND_URL:
+        return False
+
+    try:
+        import httpx
+
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                f"{Config.FRONTEND_URL}/api/calls/update-audio",
+                json={
+                    "call_sid": call_sid,
+                    "audio_url": audio_url,
+                    "retry_count": retry_count
+                },
+                timeout=10.0
+            )
+
+            # Handle successful update
+            if response.status_code == 200:
+                Log.info(f"✅ Notified frontend of audio upload: {call_sid}")
+                return True
+
+            # Handle 404 with retry flag (race condition - call not saved yet)
+            if response.status_code == 404:
+                try:
+                    data = response.json()
+                    if data.get("retry") and retry_count < 2:
+                        retry_after_ms = data.get("retry_after", 2000)
+                        retry_after_sec = retry_after_ms / 1000
+                        Log.info(f"⏳ Call not found yet, retrying in {retry_after_sec}s... (attempt {retry_count + 1}/3)")
+                        await asyncio.sleep(retry_after_sec)
+                        return await notify_frontend_audio_upload(call_sid, audio_url, retry_count + 1)
+                    else:
+                        Log.error(f"❌ Call not found after {retry_count + 1} attempts: {call_sid}")
+                        return False
+                except Exception as parse_error:
+                    Log.error(f"❌ Failed to parse 404 response: {parse_error}")
+                    return False
+
+            # Handle other error responses
+            Log.warning(f"⚠️ Frontend returned {response.status_code}: {response.text}")
+            return False
+
+    except Exception as e:
+        Log.warning(f"⚠️ Failed to notify frontend: {e}")
+        return False
+
+
 @app.api_route("/recording-status", methods=["POST"])
 async def handle_recording_status(request: Request):
     """
@@ -601,23 +661,8 @@ async def handle_recording_status(request: Request):
                     Log.info(f"✅ Recording metadata stored in database: {recording_sid}")
                     Log.info(f"📊 Database response: {result}")
 
-                    # Notify frontend that audio URL is available
-                    if Config.FRONTEND_URL:
-                        try:
-                            async with httpx.AsyncClient() as client:
-                                frontend_response = await client.post(
-                                    f"{Config.FRONTEND_URL}/api/calls/update-audio",
-                                    json={
-                                        "call_sid": call_sid,
-                                        "audio_url": public_url
-                                    },
-                                    timeout=10.0
-                                )
-                                frontend_response.raise_for_status()
-                                Log.info(f"✅ Notified frontend of audio upload: {call_sid}")
-                        except Exception as frontend_error:
-                            Log.warning(f"⚠️ Failed to notify frontend: {frontend_error}")
-                            # Don't fail the whole operation if frontend notification fails
+                    # Notify frontend that audio URL is available (with retry handling)
+                    await notify_frontend_audio_upload(call_sid, public_url)
 
                 except Exception as e:
                     Log.error(f"❌ Failed to download/upload recording: {e}")
