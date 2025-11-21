@@ -509,7 +509,7 @@ async def notify_frontend_audio_upload(call_sid: str, audio_url: str, retry_coun
             response = await client.post(
                 f"{Config.FRONTEND_URL}/api/calls/save",
                 json={
-                    "call_sid": call_sid,
+                    "call_id": call_sid,  # Frontend expects call_id
                     "audio_url": audio_url,
                     "update_audio_only": True,  # Only update audio URL, don't create full record
                     "retry_count": retry_count
