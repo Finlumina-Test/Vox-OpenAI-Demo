@@ -23,7 +23,9 @@ class TwilioService:
             num_digits=1,
             timeout=60,
             action=f"{backend_url}/demo-start",
-            method="POST"
+            method="POST",
+            input="dtmf",  # 🔥 Only listen for keypad (faster interrupt)
+            finish_on_key=""  # 🔥 ANY key finishes immediately
         )
         
         # Welcome - NO PAUSE (faster)
@@ -102,8 +104,9 @@ class TwilioService:
         )
 
         if skipped:
+            # 🔥 Ultra short message for instant connect
             response.say(
-                "Skipping to demo. Connecting you now.",
+                "Connecting now.",
                 voice=TwilioService.TWILIO_VOICE
             )
         else:
