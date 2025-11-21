@@ -504,7 +504,7 @@ async def notify_frontend_audio_upload(call_sid: str, audio_url: str, retry_coun
     Args:
         call_sid: Twilio call SID
         audio_url: Public URL to the audio file in Supabase Storage
-        retry_count: Current retry attempt (max 2 retries = 3 total attempts)
+        retry_count: Current retry attempt (max 5 retries = 6 total attempts)
 
     Returns:
         True if notification successful, False otherwise
@@ -529,28 +529,32 @@ async def notify_frontend_audio_upload(call_sid: str, audio_url: str, retry_coun
 
             # Handle successful update
             if response.status_code == 200:
-                Log.info(f"✅ Notified frontend of audio upload: {call_sid}")
+                Log.info(f"✅ Audio URL updated: {call_sid}")
                 return True
 
             # Handle 404 with retry flag (race condition - call not saved yet)
             if response.status_code == 404:
                 try:
                     data = response.json()
-                    if data.get("retry") and retry_count < 2:
-                        retry_after_ms = data.get("retry_after", 2000)
+                    if data.get("retry") and retry_count < 5:  # Max 6 attempts (0-5)
+                        retry_after_ms = data.get("retry_after", 1000)  # Default 1 second
                         retry_after_sec = retry_after_ms / 1000
-                        Log.info(f"⏳ Call not found yet, retrying in {retry_after_sec}s... (attempt {retry_count + 1}/3)")
+                        Log.info(f"⏳ Call not found yet (attempt {retry_count + 1}/6), waiting {retry_after_sec}s...")
                         await asyncio.sleep(retry_after_sec)
                         return await notify_frontend_audio_upload(call_sid, audio_url, retry_count + 1)
                     else:
-                        Log.error(f"❌ Call not found after {retry_count + 1} attempts: {call_sid}")
+                        Log.error(f"❌ Failed to update audio URL: Call not found after {retry_count + 1} attempts - {call_sid}")
                         return False
                 except Exception as parse_error:
                     Log.error(f"❌ Failed to parse 404 response: {parse_error}")
                     return False
 
             # Handle other error responses
-            Log.warning(f"⚠️ Frontend returned {response.status_code}: {response.text}")
+            try:
+                data = response.json()
+                Log.warning(f"⚠️ Failed to update audio URL: {response.status_code} - {data}")
+            except:
+                Log.warning(f"⚠️ Frontend returned {response.status_code}: {response.text}")
             return False
 
     except Exception as e:
