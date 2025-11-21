@@ -561,13 +561,17 @@ async def handle_recording_status(request: Request):
                     Log.info(f"✅ Downloaded {len(audio_bytes)} bytes from Twilio")
 
                     # Step 2: Upload to Supabase Storage
-                    file_name = f"{call_sid}.mp3"
+                    # Use recording_sid to avoid duplicates if multiple recordings per call
+                    file_name = f"{call_sid}_{recording_sid}.mp3"
                     Log.info(f"📤 Uploading to Supabase Storage: {Config.SUPABASE_BUCKET}/{file_name}")
 
                     storage_response = supabase.storage.from_(Config.SUPABASE_BUCKET).upload(
                         path=file_name,
                         file=audio_bytes,
-                        file_options={"content-type": "audio/mpeg"}
+                        file_options={
+                            "content-type": "audio/mpeg",
+                            "upsert": "true"  # Overwrite if exists (shouldn't happen but just in case)
+                        }
                     )
 
                     Log.info(f"✅ Uploaded to Supabase Storage: {file_name}")
@@ -587,8 +591,12 @@ async def handle_recording_status(request: Request):
                         'order_items': [],  # Initialize empty, can be populated from conversation
                     }
 
-                    # Insert into Supabase database
-                    result = supabase.table(Config.SUPABASE_TABLE).insert(recording_data).execute()
+                    # Upsert into Supabase database (insert or update if call_sid exists)
+                    # This handles the case where multiple recordings exist for the same call
+                    result = supabase.table(Config.SUPABASE_TABLE).upsert(
+                        recording_data,
+                        on_conflict='call_sid'  # Use call_sid as the unique key
+                    ).execute()
 
                     Log.info(f"✅ Recording metadata stored in database: {recording_sid}")
                     Log.info(f"📊 Database response: {result}")
@@ -1328,7 +1336,24 @@ async def handle_media_stream(websocket: WebSocket):
             
             current_call_sid = getattr(connection_manager.state, 'call_sid', stream_sid)
             Log.event("Twilio Start", {"streamSid": stream_sid, "callSid": current_call_sid})
-            
+
+            # 🎙️ Start call recording via Twilio REST API (once per call)
+            if Config.has_twilio_credentials():
+                try:
+                    from twilio.rest import Client
+                    client = Client(Config.TWILIO_ACCOUNT_SID, Config.TWILIO_AUTH_TOKEN)
+
+                    # Start recording the call
+                    recording = client.calls(current_call_sid).recordings.create(
+                        recording_status_callback=f'https://{websocket.url.hostname}/recording-status',
+                        recording_status_callback_method='POST',
+                        recording_status_callback_event=['completed']
+                    )
+
+                    Log.info(f"🎙️ Started call recording via API: {recording.sid}")
+                except Exception as e:
+                    Log.error(f"❌ Failed to start call recording: {e}")
+
             # Find demo session AND restaurant_id
             for sid, data in demo_sessions.items():
                 if data.get('call_sid') == current_call_sid:

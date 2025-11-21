@@ -90,18 +90,9 @@ class TwilioService:
         """
         TwiML to start OpenAI media stream after key press.
         🔥 Different message if user skipped the intro
-        🎙️ Records the entire call automatically
+        🎙️ Recording will be started via REST API (not <Record> verb to avoid blocking)
         """
         response = VoiceResponse()
-
-        # 🎙️ Start recording the call
-        response.record(
-            recording_status_callback=f'https://{backend_host}/recording-status',
-            recording_status_callback_method='POST',
-            recording_status_callback_event='completed',
-            max_length=3600,  # Max 1 hour
-            transcribe=False,  # We don't need Twilio transcription (have OpenAI)
-        )
 
         if skipped:
             # 🔥 Ultra short message for instant connect
