@@ -56,21 +56,37 @@ DEMO_DURATION_SECONDS=60
 
 If you want to store call recordings in Supabase:
 
-1. Create a new Supabase project at https://supabase.com
-2. Run the migration script to create the `calls` table:
+1. **Create a Supabase project** at https://supabase.com
 
-```bash
-# In your Supabase SQL Editor, run:
-cat supabase_migration.sql
-```
+2. **Create Storage Bucket**:
+   - Go to Storage in your Supabase dashboard
+   - Click "New bucket"
+   - Name: `call-recordings`
+   - Make it **public** (for easy access to recordings)
+   - Click "Create bucket"
 
-3. Add your Supabase credentials to `.env`
+3. **Set Bucket Policies** (if needed):
+   - Allow public read: `SELECT` for `public`
+   - Allow public insert: `INSERT` for `public`
+
+4. **Run the migration script** to create the `calls` table:
+   ```sql
+   -- In your Supabase SQL Editor, copy/paste from supabase_migration.sql
+   ```
+
+5. **Add credentials to `.env`**:
+   ```bash
+   SUPABASE_URL=https://your-project.supabase.co
+   SUPABASE_KEY=your_supabase_anon_key
+   SUPABASE_TABLE=calls
+   SUPABASE_BUCKET=call-recordings
+   ```
 
 The `calls` table schema includes:
 - `call_sid` - Unique Twilio call identifier
 - `restaurant_id` - Restaurant/business identifier
 - `phone_number` - Caller's phone number
-- `audio_url` - URL to the Twilio recording
+- `audio_url` - **URL to Supabase Storage** (permanent storage)
 - `call_duration` - Duration in seconds
 - `transcript` - JSON array of conversation turns
 - `order_items` - JSON array of ordered items (for restaurant use cases)
@@ -117,25 +133,38 @@ In your Twilio phone number settings:
 
 When a call completes and the recording is ready:
 
-1. Twilio sends a POST request to `/recording-status`
-2. The backend extracts:
+1. **Twilio Callback**: Twilio sends a POST request to `/recording-status` with recording details
+2. **Download**: Backend downloads the audio file from Twilio (authenticated with Twilio credentials)
+3. **Upload to Storage**: Audio file is uploaded to Supabase Storage bucket (`call-recordings`)
+4. **Get Public URL**: Backend retrieves the permanent public URL from Supabase Storage
+5. **Store Metadata**: Record is inserted into `calls` table with:
    - `call_sid` - Unique call identifier
-   - `recording_url` - Twilio recording URL
-   - `recording_duration` - Call length
-   - Session metadata (phone, restaurant_id)
-3. Data is inserted into the `calls` table in Supabase
-4. You can later update the record with:
-   - `transcript` - Conversation turns from OpenAI
-   - `order_items` - Extracted order details
-   - `customer_name`, `delivery_address`, etc.
+   - `audio_url` - **Supabase Storage URL** (permanent, not Twilio URL)
+   - `call_duration` - Call length in seconds
+   - `phone_number`, `restaurant_id` - Session metadata
+   - `transcript`, `order_items` - Empty arrays (populate later)
+
+**Why download and re-upload?**
+- Twilio recordings expire after 30-90 days
+- Supabase Storage provides permanent storage
+- You own the audio files completely
+
+You can later update records with:
+- `transcript` - Conversation turns from OpenAI
+- `order_items` - Extracted order details
+- `customer_name`, `delivery_address`, etc.
 
 ## Architecture
 
 ```
 Caller → Twilio → WebSocket → Server → OpenAI Realtime API
-                     ↓
-                 Supabase (call recordings)
-                     ↓
+           ↓                      ↓
+      Recording              Download Audio
+           ↓                      ↓
+      Callback  →  Server  →  Supabase Storage (permanent)
+                      ↓
+                 Supabase DB (metadata + URL)
+                      ↓
                  Dashboard (real-time monitoring)
 ```
 
@@ -145,7 +174,7 @@ Caller → Twilio → WebSocket → Server → OpenAI Realtime API
 - `POST /demo-start` - Start the AI demo after key press
 - `POST /call-status` - Twilio status callback
 - `GET /call-status?callSid=xxx` - Check call status from frontend
-- `POST /recording-status` - Twilio recording callback → Supabase
+- `POST /recording-status` - Twilio recording callback → Download → Supabase Storage + DB
 - `GET /api/validate-session/{id}` - Validate demo session
 - `WS /media-stream` - Twilio media stream WebSocket
 - `WS /dashboard` - Real-time dashboard WebSocket

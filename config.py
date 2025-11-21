@@ -34,6 +34,7 @@ class Config:
     SUPABASE_URL: str | None = os.getenv('SUPABASE_URL')
     SUPABASE_KEY: str | None = os.getenv('SUPABASE_KEY')
     SUPABASE_TABLE: str = os.getenv('SUPABASE_TABLE', 'calls')  # Main calls table
+    SUPABASE_BUCKET: str = os.getenv('SUPABASE_BUCKET', 'call-recordings')  # Storage bucket
 
     # Demo Configuration
     DEMO_DURATION_SECONDS: int = int(os.getenv('DEMO_DURATION_SECONDS', '60'))

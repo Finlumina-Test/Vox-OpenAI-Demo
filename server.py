@@ -540,32 +540,61 @@ async def handle_recording_status(request: Request):
                         session_data = data
                         break
 
-            # Store in Supabase if configured
+            # Download from Twilio and upload to Supabase Storage
             if Config.has_supabase_configured():
                 try:
+                    import httpx
                     from supabase import create_client
 
                     supabase = create_client(Config.SUPABASE_URL, Config.SUPABASE_KEY)
 
-                    # Prepare data for Supabase (matching calls table schema)
+                    # Step 1: Download audio from Twilio
+                    Log.info(f"📥 Downloading audio from Twilio: {full_recording_url}")
+
+                    async with httpx.AsyncClient() as client:
+                        # Use basic auth with Twilio credentials
+                        auth = (Config.TWILIO_ACCOUNT_SID, Config.TWILIO_AUTH_TOKEN)
+                        response = await client.get(full_recording_url, auth=auth, timeout=30.0)
+                        response.raise_for_status()
+                        audio_bytes = response.content
+
+                    Log.info(f"✅ Downloaded {len(audio_bytes)} bytes from Twilio")
+
+                    # Step 2: Upload to Supabase Storage
+                    file_name = f"{call_sid}.mp3"
+                    Log.info(f"📤 Uploading to Supabase Storage: {Config.SUPABASE_BUCKET}/{file_name}")
+
+                    storage_response = supabase.storage.from_(Config.SUPABASE_BUCKET).upload(
+                        path=file_name,
+                        file=audio_bytes,
+                        file_options={"content-type": "audio/mpeg"}
+                    )
+
+                    Log.info(f"✅ Uploaded to Supabase Storage: {file_name}")
+
+                    # Step 3: Get public URL
+                    public_url = supabase.storage.from_(Config.SUPABASE_BUCKET).get_public_url(file_name)
+                    Log.info(f"🔗 Public URL: {public_url}")
+
+                    # Step 4: Store metadata in database with Supabase Storage URL
                     recording_data = {
                         'call_sid': call_sid,
                         'restaurant_id': session_data.get('restaurant_id', 'demo') if session_data else 'demo',
                         'phone_number': session_data.get('phone') if session_data else None,
                         'call_duration': int(recording_duration) if recording_duration else 0,
-                        'audio_url': full_recording_url,
+                        'audio_url': public_url,  # Supabase Storage URL (permanent)
                         'transcript': [],  # Initialize empty, can be updated later
                         'order_items': [],  # Initialize empty, can be populated from conversation
                     }
 
-                    # Insert into Supabase (id, created_at, updated_at auto-generated)
+                    # Insert into Supabase database
                     result = supabase.table(Config.SUPABASE_TABLE).insert(recording_data).execute()
 
-                    Log.info(f"✅ Recording stored in Supabase: {recording_sid}")
-                    Log.info(f"📊 Supabase response: {result}")
+                    Log.info(f"✅ Recording metadata stored in database: {recording_sid}")
+                    Log.info(f"📊 Database response: {result}")
 
                 except Exception as e:
-                    Log.error(f"❌ Failed to store recording in Supabase: {e}")
+                    Log.error(f"❌ Failed to download/upload recording: {e}")
                     import traceback
                     Log.error(f"Traceback: {traceback.format_exc()}")
             else:
