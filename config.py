@@ -36,6 +36,9 @@ class Config:
     SUPABASE_TABLE: str = os.getenv('SUPABASE_TABLE', 'calls')  # Main calls table
     SUPABASE_BUCKET: str = os.getenv('SUPABASE_BUCKET', 'call-recordings')  # Storage bucket
 
+    # Frontend Configuration
+    FRONTEND_URL: str | None = os.getenv('FRONTEND_URL')  # Frontend URL for audio upload notifications
+
     # Demo Configuration
     DEMO_DURATION_SECONDS: int = int(os.getenv('DEMO_DURATION_SECONDS', '60'))
 

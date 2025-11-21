@@ -601,6 +601,24 @@ async def handle_recording_status(request: Request):
                     Log.info(f"✅ Recording metadata stored in database: {recording_sid}")
                     Log.info(f"📊 Database response: {result}")
 
+                    # Notify frontend that audio URL is available
+                    if Config.FRONTEND_URL:
+                        try:
+                            async with httpx.AsyncClient() as client:
+                                frontend_response = await client.post(
+                                    f"{Config.FRONTEND_URL}/api/calls/update-audio",
+                                    json={
+                                        "call_sid": call_sid,
+                                        "audio_url": public_url
+                                    },
+                                    timeout=10.0
+                                )
+                                frontend_response.raise_for_status()
+                                Log.info(f"✅ Notified frontend of audio upload: {call_sid}")
+                        except Exception as frontend_error:
+                            Log.warning(f"⚠️ Failed to notify frontend: {frontend_error}")
+                            # Don't fail the whole operation if frontend notification fails
+
                 except Exception as e:
                     Log.error(f"❌ Failed to download/upload recording: {e}")
                     import traceback
