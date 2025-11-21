@@ -423,9 +423,19 @@ async def handle_call_status(request: Request):
         Log.info(f"📞 [StatusCallback] Duration: {call_duration}s")
         
         # Only process completed/failed calls
-        if call_status in ['completed', 'failed', 'busy', 'no-answer']:
-            Log.info(f"✅ Status matches - processing email...")
-            
+        if call_status in ['completed', 'failed', 'busy', 'no-answer', 'canceled']:
+            Log.info(f"✅ Status matches - processing...")
+
+            # Send WebSocket notification to frontend for auto-save
+            from datetime import datetime
+            broadcast_to_dashboards_nonblocking({
+                "messageType": "callEnded",
+                "callId": call_sid,
+                "status": call_status,
+                "timestamp": datetime.utcnow().isoformat()
+            }, call_sid)
+            Log.info(f"📨 Sent callEnded WebSocket message to frontend for {call_sid}")
+
             # Find session for this call
             session_id = None
             phone = from_phone
