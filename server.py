@@ -507,10 +507,11 @@ async def notify_frontend_audio_upload(call_sid: str, audio_url: str, retry_coun
 
         async with httpx.AsyncClient() as client:
             response = await client.post(
-                f"{Config.FRONTEND_URL}/api/calls/update-audio",
+                f"{Config.FRONTEND_URL}/api/calls/save",
                 json={
                     "call_sid": call_sid,
                     "audio_url": audio_url,
+                    "update_audio_only": True,  # Only update audio URL, don't create full record
                     "retry_count": retry_count
                 },
                 timeout=10.0
