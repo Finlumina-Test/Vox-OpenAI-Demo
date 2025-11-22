@@ -899,7 +899,21 @@ async def handle_takeover(request: Request):
         
         if action == "enable":
             openai_service.enable_human_takeover()
-            
+
+            # 🔥 CRITICAL: Clear Twilio audio buffer IMMEDIATELY
+            try:
+                stream_sid = getattr(connection_manager.state, 'stream_sid', None)
+                if stream_sid:
+                    clear_message = {
+                        "event": "clear",
+                        "streamSid": stream_sid
+                    }
+                    await connection_manager.send_to_twilio(clear_message)
+                    Log.info(f"[Takeover] 🔇 Cleared Twilio audio buffer (dropped AI audio)")
+            except Exception as e:
+                Log.error(f"[Takeover] Failed to clear Twilio buffer: {e}")
+
+            # Cancel any ongoing AI response
             try:
                 await connection_manager.send_to_openai({
                     "type": "response.cancel"
@@ -907,7 +921,8 @@ async def handle_takeover(request: Request):
                 Log.info(f"[Takeover] Cancelled AI response")
             except Exception:
                 Log.debug(f"[Takeover] No active response to cancel (normal)")
-            
+
+            # Clear input audio buffer
             try:
                 await connection_manager.send_to_openai({
                     "type": "input_audio_buffer.clear"
@@ -1123,14 +1138,19 @@ async def handle_media_stream(websocket: WebSocket):
     async def ai_audio_streamer():
         nonlocal ai_currently_speaking
         Log.info("[AI Streamer] 🎵 Started")
-        
+
         while not shutdown_flag:
             try:
                 audio_data = await ai_audio_queue.get()
-                
+
                 if audio_data is None:
                     break
-                
+
+                # 🔥 CRITICAL: Drop AI audio if human has taken over
+                if openai_service.is_human_in_control():
+                    ai_audio_queue.task_done()
+                    continue
+
                 audio_b64 = audio_data.get("audio", "")
                 try:
                     audio_bytes = base64.b64decode(audio_b64)
