@@ -1436,6 +1436,8 @@ async def handle_media_stream(websocket: WebSocket):
                         "messageType": "callStarted",
                         "callSid": current_call_sid,
                         "sessionId": demo_session_id,
+                        "phoneNumber": data.get('phone'),  # Caller's phone number
+                        "restaurantId": restaurant_id,
                         "timestamp": int(time.time() * 1000)
                     }, current_call_sid)
                     
