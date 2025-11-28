@@ -1311,8 +1311,24 @@ async def handle_media_stream(websocket: WebSocket):
                                 # 🔥 Track when FIRST audio is sent to Twilio
                                 if hasattr(connection_manager.state, 'speech_stopped_time') and not hasattr(connection_manager.state, 'first_audio_sent'):
                                     total_to_twilio = (time.time() - connection_manager.state.speech_stopped_time) * 1000
-                                    Log.info(f"📞 [LATENCY] First audio SENT TO TWILIO in {total_to_twilio:.0f}ms from speech stopped")
+                                    # Calculate audio chunk size
+                                    import base64
+                                    try:
+                                        audio_bytes = base64.b64decode(audio_message['media']['payload'])
+                                        chunk_size = len(audio_bytes)
+                                        # 8kHz mulaw: 8000 bytes/sec, so bytes/8 = milliseconds of audio
+                                        audio_duration_ms = (chunk_size / 8000) * 1000
+                                        Log.info(f"📞 [LATENCY] First audio SENT TO TWILIO in {total_to_twilio:.0f}ms | Chunk: {chunk_size} bytes ({audio_duration_ms:.1f}ms of audio)")
+                                    except:
+                                        Log.info(f"📞 [LATENCY] First audio SENT TO TWILIO in {total_to_twilio:.0f}ms from speech stopped")
                                     connection_manager.state.first_audio_sent = True
+                                    connection_manager.state.audio_chunk_count = 1
+                                elif hasattr(connection_manager.state, 'audio_chunk_count'):
+                                    connection_manager.state.audio_chunk_count += 1
+                                    # Log every 10th chunk to see streaming pattern
+                                    if connection_manager.state.audio_chunk_count % 10 == 0:
+                                        elapsed = (time.time() - connection_manager.state.speech_stopped_time) * 1000
+                                        Log.info(f"📊 [LATENCY] Sent {connection_manager.state.audio_chunk_count} chunks in {elapsed:.0f}ms")
 
                                 mark_msg = audio_service.create_mark_message(
                                     connection_manager.state.stream_sid
