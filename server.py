@@ -1292,13 +1292,13 @@ async def handle_media_stream(websocket: WebSocket):
             try:
                 if openai_service.is_human_in_control():
                     return
-                
+
                 audio_data = openai_service.extract_audio_response_data(response) or {}
                 delta = audio_data.get("delta")
 
                 if delta:
                     should_send_to_dashboard = True
-                    
+
                     if getattr(connection_manager.state, "stream_sid", None):
                         try:
                             audio_message = audio_service.process_outgoing_audio(
@@ -1306,19 +1306,27 @@ async def handle_media_stream(websocket: WebSocket):
                             )
                             if audio_message:
                                 await connection_manager.send_to_twilio(audio_message)
+
+                                # 🔥 Track when FIRST audio is sent to Twilio
+                                if hasattr(connection_manager.state, 'speech_stopped_time') and not hasattr(connection_manager.state, 'first_audio_sent'):
+                                    import time
+                                    total_to_twilio = (time.time() - connection_manager.state.speech_stopped_time) * 1000
+                                    Log.info(f"📞 [LATENCY] First audio SENT TO TWILIO in {total_to_twilio:.0f}ms from speech stopped")
+                                    connection_manager.state.first_audio_sent = True
+
                                 mark_msg = audio_service.create_mark_message(
                                     connection_manager.state.stream_sid
                                 )
                                 await connection_manager.send_to_twilio(mark_msg)
                         except Exception as e:
                             Log.error(f"[audio->twilio] failed: {e}")
-                    
+
                     if should_send_to_dashboard:
                         await handle_ai_audio({
                             "audio": delta,
                             "timestamp": int(time.time() * 1000)
                         })
-                        
+
             except Exception as e:
                 Log.error(f"[audio-delta] failed: {e}")
 

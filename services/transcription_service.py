@@ -26,7 +26,7 @@ class TranscriptionService:
     
     # Speaker turn detection
     SPEAKER_SILENCE_THRESHOLD = 0.3  # If no chunks for 0.3s, speaker is done
-    SPEAKER_TRANSITION_DELAY = 0.0   # 🔥 NO DELAY - We want instant responses!
+    SPEAKER_TRANSITION_DELAY = 1.0   # 1 SECOND gap for Caller->AI (DASHBOARD ONLY, doesn't affect call)
     
     def __init__(self):
         # Unified audio queue
