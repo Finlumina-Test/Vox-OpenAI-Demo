@@ -1274,7 +1274,6 @@ async def handle_media_stream(websocket: WebSocket):
                                 audio_message = audio_service.process_incoming_audio(data)
                                 if audio_message:
                                     await connection_manager.send_to_openai(audio_message)
-                                    Log.debug(f"[media] 🎤 Sent caller audio to OpenAI")
                             except Exception as e:
                                 Log.error(f"[media] failed to send to OpenAI: {e}")
                         
@@ -1296,11 +1295,10 @@ async def handle_media_stream(websocket: WebSocket):
                 
                 audio_data = openai_service.extract_audio_response_data(response) or {}
                 delta = audio_data.get("delta")
-                
+
                 if delta:
-                    Log.debug(f"[audio-delta] 🔊 Received AI audio delta")
                     should_send_to_dashboard = True
-                    
+
                     if getattr(connection_manager.state, "stream_sid", None):
                         try:
                             audio_message = audio_service.process_outgoing_audio(
@@ -1312,7 +1310,6 @@ async def handle_media_stream(websocket: WebSocket):
                                     connection_manager.state.stream_sid
                                 )
                                 await connection_manager.send_to_twilio(mark_msg)
-                                Log.debug(f"[audio-delta] 📞 Sent AI audio to Twilio")
                         except Exception as e:
                             Log.error(f"[audio->twilio] failed: {e}")
                     
@@ -1371,9 +1368,6 @@ async def handle_media_stream(websocket: WebSocket):
         async def handle_other_openai_event(response: dict):
             event_type = response.get('type', '')
 
-            # Log every event from OpenAI
-            Log.info(f"[OpenAI Event] {event_type}")
-
             # 🔥 LATENCY TRACKING - Measure delay from VAD commit to first audio
             if event_type == 'input_audio_buffer.committed':
                 import time
@@ -1392,18 +1386,15 @@ async def handle_media_stream(websocket: WebSocket):
                     Log.info(f"🔥 [LATENCY] First audio delta in {delay:.0f}ms after VAD commit")
                     delattr(connection_manager.state, 'vad_commit_time')  # Clear to avoid duplicate logs
 
+            # Only log important events (not spammy deltas)
             if event_type == 'session.created':
                 Log.info("✅ [OpenAI] Session created successfully")
             elif event_type == 'session.updated':
                 Log.info("✅ [OpenAI] Session updated successfully")
-            elif event_type == 'response.audio_transcript.delta':
-                Log.debug(f"[OpenAI] 📝 AI transcript delta received")
-            elif event_type == 'response.audio_transcript.done':
-                Log.debug(f"[OpenAI] ✅ AI transcript complete")
             elif event_type == 'conversation.item.input_audio_transcription.completed':
-                Log.debug(f"[OpenAI] 📝 Caller transcript received")
+                Log.info(f"[OpenAI] 📝 Caller transcript received")
             elif event_type == 'response.done':
-                Log.debug(f"[OpenAI] ✅ Response complete")
+                Log.info(f"[OpenAI] ✅ Response complete")
             elif event_type == 'error':
                 Log.error(f"[OpenAI] ❌ Error event: {response}")
 
