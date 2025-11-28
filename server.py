@@ -1289,6 +1289,7 @@ async def handle_media_stream(websocket: WebSocket):
                             }, current_call_sid)
 
         async def handle_audio_delta(response: dict):
+            import time  # Import at function level
             try:
                 if openai_service.is_human_in_control():
                     return
@@ -1309,7 +1310,6 @@ async def handle_media_stream(websocket: WebSocket):
 
                                 # 🔥 Track when FIRST audio is sent to Twilio
                                 if hasattr(connection_manager.state, 'speech_stopped_time') and not hasattr(connection_manager.state, 'first_audio_sent'):
-                                    import time
                                     total_to_twilio = (time.time() - connection_manager.state.speech_stopped_time) * 1000
                                     Log.info(f"📞 [LATENCY] First audio SENT TO TWILIO in {total_to_twilio:.0f}ms from speech stopped")
                                     connection_manager.state.first_audio_sent = True
@@ -1374,6 +1374,7 @@ async def handle_media_stream(websocket: WebSocket):
                 Log.error(f"[Interruption] Error: {e}")
 
         async def handle_other_openai_event(response: dict):
+            import time  # Import at function level to avoid scoping issues
             event_type = response.get('type', '')
 
             # Filter out spammy/repetitive events from logs
@@ -1395,12 +1396,10 @@ async def handle_media_stream(websocket: WebSocket):
 
             # 🔥 END-TO-END LATENCY TRACKING
             if event_type == 'input_audio_buffer.speech_stopped':
-                import time
                 nonlocal connection_manager
                 connection_manager.state.speech_stopped_time = time.time()
                 Log.info("🔇 [LATENCY] User stopped speaking - VAD detecting silence...")
             elif event_type == 'input_audio_buffer.committed':
-                import time
                 connection_manager.state.vad_commit_time = time.time()
                 if hasattr(connection_manager.state, 'speech_stopped_time'):
                     delay = (time.time() - connection_manager.state.speech_stopped_time) * 1000
@@ -1408,12 +1407,10 @@ async def handle_media_stream(websocket: WebSocket):
                 else:
                     Log.info("⏱️ [LATENCY] VAD committed buffer - waiting for response...")
             elif event_type == 'response.created':
-                import time
                 if hasattr(connection_manager.state, 'vad_commit_time'):
                     delay = (time.time() - connection_manager.state.vad_commit_time) * 1000
                     Log.info(f"⏱️ [LATENCY] Response created in {delay:.0f}ms after VAD commit")
             elif event_type == 'response.audio.delta':
-                import time
                 if hasattr(connection_manager.state, 'vad_commit_time'):
                     vad_delay = (time.time() - connection_manager.state.vad_commit_time) * 1000
                     Log.info(f"🔥 [LATENCY] First audio delta in {vad_delay:.0f}ms after VAD commit")
