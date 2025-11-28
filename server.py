@@ -363,10 +363,46 @@ async def demo_rating(request: Request):
         response.hangup()
         return Response(content=str(response), media_type="application/xml")
 
-@app.api_route("/call-status", methods=["POST"])
+@app.api_route("/call-status", methods=["GET", "POST"])
 async def handle_call_status(request: Request):
-    """Handle Twilio call status callbacks (hangup tracking)."""
+    """
+    Handle call status:
+    - GET: Frontend check if call has ended (returns JSON)
+    - POST: Twilio status callback (hangup tracking)
+    """
     try:
+        # GET request from frontend - check if call has ended
+        if request.method == "GET":
+            call_sid = request.query_params.get('callSid')
+
+            if not call_sid:
+                return JSONResponse({"error": "Missing callSid parameter"}, status_code=400)
+
+            # Check if call is still active in active_calls
+            is_active = call_sid in active_calls
+
+            # Check if call ended (exists in demo_sessions but not in active_calls)
+            session_data = None
+            for sid, data in demo_sessions.items():
+                if data.get('call_sid') == call_sid:
+                    session_data = data
+                    break
+
+            # Also check pending sessions
+            if not session_data:
+                for sid, data in demo_pending_start.items():
+                    if data.get('call_sid') == call_sid:
+                        session_data = data
+                        break
+
+            return JSONResponse({
+                "callSid": call_sid,
+                "isActive": is_active,
+                "hasEnded": not is_active and session_data is not None,
+                "exists": session_data is not None
+            })
+
+        # POST request from Twilio - status callback
         Log.info("=" * 80)
         Log.info("🔥 CALL STATUS CALLBACK RECEIVED")
         Log.info("=" * 80)
@@ -387,9 +423,19 @@ async def handle_call_status(request: Request):
         Log.info(f"📞 [StatusCallback] Duration: {call_duration}s")
         
         # Only process completed/failed calls
-        if call_status in ['completed', 'failed', 'busy', 'no-answer']:
-            Log.info(f"✅ Status matches - processing email...")
-            
+        if call_status in ['completed', 'failed', 'busy', 'no-answer', 'canceled']:
+            Log.info(f"✅ Status matches - processing...")
+
+            # Send WebSocket notification to frontend for auto-save
+            from datetime import datetime
+            broadcast_to_dashboards_nonblocking({
+                "messageType": "callEnded",
+                "callId": call_sid,
+                "status": call_status,
+                "timestamp": datetime.utcnow().isoformat()
+            }, call_sid)
+            Log.info(f"📨 Sent callEnded WebSocket message to frontend for {call_sid}")
+
             # Find session for this call
             session_id = None
             phone = from_phone
@@ -443,13 +489,203 @@ async def handle_call_status(request: Request):
         
         Log.info("=" * 80)
         return Response(content="OK", status_code=200)
-        
+
     except Exception as e:
         Log.error(f"[StatusCallback] Error: {e}")
         import traceback
         Log.error(f"Traceback: {traceback.format_exc()}")
         return Response(content="ERROR", status_code=200)
-        
+
+
+async def notify_frontend_audio_upload(call_sid: str, audio_url: str, retry_count: int = 0) -> bool:
+    """
+    Notify frontend that audio URL is available with retry handling for race conditions.
+
+    Args:
+        call_sid: Twilio call SID
+        audio_url: Public URL to the audio file in Supabase Storage
+        retry_count: Current retry attempt (max 9 retries = 10 total attempts)
+
+    Returns:
+        True if notification successful, False otherwise
+    """
+    if not Config.FRONTEND_URL:
+        return False
+
+    try:
+        import httpx
+
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                f"{Config.FRONTEND_URL}/api/calls/save",
+                json={
+                    "call_id": call_sid,  # Frontend expects call_id
+                    "audio_url": audio_url,
+                    "update_audio_only": True,  # Only update audio URL, don't create full record
+                    "retry_count": retry_count
+                },
+                timeout=10.0
+            )
+
+            # Handle successful update
+            if response.status_code == 200:
+                Log.info(f"✅ Audio URL updated: {call_sid}")
+                return True
+
+            # Handle 404 with retry flag (race condition - call not saved yet)
+            if response.status_code == 404:
+                try:
+                    data = response.json()
+                    if data.get("retry") and retry_count < 9:  # Max 10 attempts (0-9)
+                        retry_after_ms = data.get("retry_after", 1000)  # Default 1 second
+                        retry_after_sec = retry_after_ms / 1000
+                        Log.info(f"⏳ Call not found yet (attempt {retry_count + 1}/10), waiting {retry_after_sec}s...")
+                        await asyncio.sleep(retry_after_sec)
+                        return await notify_frontend_audio_upload(call_sid, audio_url, retry_count + 1)
+                    else:
+                        Log.error(f"❌ Failed to update audio URL: Call not found after {retry_count + 1} attempts - {call_sid}")
+                        return False
+                except Exception as parse_error:
+                    Log.error(f"❌ Failed to parse 404 response: {parse_error}")
+                    return False
+
+            # Handle other error responses
+            try:
+                data = response.json()
+                Log.warning(f"⚠️ Failed to update audio URL: {response.status_code} - {data}")
+            except:
+                Log.warning(f"⚠️ Frontend returned {response.status_code}: {response.text}")
+            return False
+
+    except Exception as e:
+        Log.warning(f"⚠️ Failed to notify frontend: {e}")
+        return False
+
+
+@app.api_route("/recording-status", methods=["POST"])
+async def handle_recording_status(request: Request):
+    """
+    Handle Twilio recording status callback.
+    Stores recording URL in Supabase when recording is completed.
+    """
+    try:
+        form_data = await request.form()
+
+        Log.info("=" * 80)
+        Log.info("🎙️ RECORDING STATUS CALLBACK RECEIVED")
+        Log.info("=" * 80)
+
+        # Log all form data for debugging
+        Log.info(f"📋 Recording callback data: {dict(form_data)}")
+
+        # Extract recording data
+        recording_sid = form_data.get('RecordingSid')
+        recording_url = form_data.get('RecordingUrl')
+        recording_status = form_data.get('RecordingStatus')
+        call_sid = form_data.get('CallSid')
+        recording_duration = form_data.get('RecordingDuration', '0')
+
+        Log.info(f"🎙️ RecordingSid: {recording_sid}")
+        Log.info(f"🎙️ RecordingUrl: {recording_url}")
+        Log.info(f"🎙️ Status: {recording_status}")
+        Log.info(f"🎙️ CallSid: {call_sid}")
+        Log.info(f"🎙️ Duration: {recording_duration}s")
+
+        # Only process completed recordings
+        if recording_status == 'completed' and recording_url:
+            # Add .mp3 extension to URL for direct download
+            full_recording_url = f"{recording_url}.mp3"
+
+            Log.info(f"✅ Recording completed: {full_recording_url}")
+
+            # Find session data for this call
+            session_id = None
+            session_data = None
+
+            for sid, data in demo_sessions.items():
+                if data.get('call_sid') == call_sid:
+                    session_id = sid
+                    session_data = data
+                    break
+
+            if not session_data:
+                for sid, data in demo_pending_start.items():
+                    if data.get('call_sid') == call_sid:
+                        session_id = sid
+                        session_data = data
+                        break
+
+            # Download from Twilio and upload to Supabase Storage
+            if Config.has_supabase_configured():
+                try:
+                    import httpx
+                    from supabase import create_client
+
+                    supabase = create_client(Config.SUPABASE_URL, Config.SUPABASE_KEY)
+
+                    # Step 1: Download audio from Twilio
+                    Log.info(f"📥 Downloading audio from Twilio: {full_recording_url}")
+
+                    async with httpx.AsyncClient() as client:
+                        # Use basic auth with Twilio credentials
+                        auth = (Config.TWILIO_ACCOUNT_SID, Config.TWILIO_AUTH_TOKEN)
+                        response = await client.get(full_recording_url, auth=auth, timeout=30.0)
+                        response.raise_for_status()
+                        audio_bytes = response.content
+
+                    Log.info(f"✅ Downloaded {len(audio_bytes)} bytes from Twilio")
+
+                    # Step 2: Upload to Supabase Storage
+                    # Use recording_sid to avoid duplicates if multiple recordings per call
+                    file_name = f"{call_sid}_{recording_sid}.mp3"
+                    Log.info(f"📤 Uploading to Supabase Storage: {Config.SUPABASE_BUCKET}/{file_name}")
+
+                    storage_response = supabase.storage.from_(Config.SUPABASE_BUCKET).upload(
+                        path=file_name,
+                        file=audio_bytes,
+                        file_options={
+                            "content-type": "audio/mpeg",
+                            "upsert": "true"  # Overwrite if exists (shouldn't happen but just in case)
+                        }
+                    )
+
+                    Log.info(f"✅ Uploaded to Supabase Storage: {file_name}")
+
+                    # Step 3: Get public URL
+                    public_url = supabase.storage.from_(Config.SUPABASE_BUCKET).get_public_url(file_name)
+                    Log.info(f"🔗 Public URL: {public_url}")
+
+                    # Step 4: Update only audio_url in database (don't touch other fields)
+                    from datetime import datetime
+
+                    result = supabase.table(Config.SUPABASE_TABLE).update({
+                        'audio_url': public_url,
+                        'updated_at': datetime.utcnow().isoformat()
+                    }).eq('call_sid', call_sid).execute()
+
+                    Log.info(f"✅ Recording audio URL updated in database: {recording_sid}")
+                    Log.info(f"📊 Database response: {result}")
+
+                    # Notify frontend that audio URL is available (with retry handling)
+                    await notify_frontend_audio_upload(call_sid, public_url)
+
+                except Exception as e:
+                    Log.error(f"❌ Failed to download/upload recording: {e}")
+                    import traceback
+                    Log.error(f"Traceback: {traceback.format_exc()}")
+            else:
+                Log.warning("⚠️ Supabase not configured - recording URL not stored")
+                Log.warning(f"💡 Recording URL: {full_recording_url}")
+
+        Log.info("=" * 80)
+        return Response(content="OK", status_code=200)
+
+    except Exception as e:
+        Log.error(f"[RecordingCallback] Error: {e}")
+        import traceback
+        Log.error(f"Traceback: {traceback.format_exc()}")
+        return Response(content="ERROR", status_code=200)
+
 
 @app.get("/api/validate-session/{session_id}")
 async def validate_session(session_id: str):
@@ -663,7 +899,21 @@ async def handle_takeover(request: Request):
         
         if action == "enable":
             openai_service.enable_human_takeover()
-            
+
+            # 🔥 CRITICAL: Clear Twilio audio buffer IMMEDIATELY
+            try:
+                stream_sid = getattr(connection_manager.state, 'stream_sid', None)
+                if stream_sid:
+                    clear_message = {
+                        "event": "clear",
+                        "streamSid": stream_sid
+                    }
+                    await connection_manager.send_to_twilio(clear_message)
+                    Log.info(f"[Takeover] 🔇 Cleared Twilio audio buffer (dropped AI audio)")
+            except Exception as e:
+                Log.error(f"[Takeover] Failed to clear Twilio buffer: {e}")
+
+            # Cancel any ongoing AI response
             try:
                 await connection_manager.send_to_openai({
                     "type": "response.cancel"
@@ -671,7 +921,8 @@ async def handle_takeover(request: Request):
                 Log.info(f"[Takeover] Cancelled AI response")
             except Exception:
                 Log.debug(f"[Takeover] No active response to cancel (normal)")
-            
+
+            # Clear input audio buffer
             try:
                 await connection_manager.send_to_openai({
                     "type": "input_audio_buffer.clear"
@@ -887,28 +1138,36 @@ async def handle_media_stream(websocket: WebSocket):
     async def ai_audio_streamer():
         nonlocal ai_currently_speaking
         Log.info("[AI Streamer] 🎵 Started")
-        
+
         while not shutdown_flag:
             try:
                 audio_data = await ai_audio_queue.get()
-                
+
                 if audio_data is None:
                     break
-                
+
+                # 🔥 CRITICAL: Drop AI audio if human has taken over
+                if openai_service.is_human_in_control():
+                    ai_audio_queue.task_done()
+                    continue
+
                 audio_b64 = audio_data.get("audio", "")
                 try:
                     audio_bytes = base64.b64decode(audio_b64)
+                    # 📞 mulaw at 8kHz: 8000 samples/sec * 1 byte/sample = 8000 bytes/sec
                     duration_seconds = len(audio_bytes) / 8000.0
                 except Exception as e:
                     duration_seconds = 0.02
-                
+
                 ai_currently_speaking = True
-                
+
                 if current_call_sid:
                     broadcast_to_dashboards_nonblocking({
                         "messageType": "audio",
                         "speaker": "AI",
                         "audio": audio_b64,
+                        "format": "mulaw",      # 📞 Mulaw from OpenAI (frontend upsamples)
+                        "sampleRate": 8000,     # 📞 8kHz
                         "timestamp": audio_data.get("timestamp", int(time.time() * 1000)),
                         "callSid": current_call_sid,
                     }, current_call_sid)
@@ -1004,6 +1263,8 @@ async def handle_media_stream(websocket: WebSocket):
                                 "messageType": "audio",
                                 "speaker": "Caller",
                                 "audio": payload_b64,
+                                "format": "mulaw",      # 📞 Phone quality mulaw from Twilio
+                                "sampleRate": 8000,     # 📞 8kHz (phone line limit)
                                 "timestamp": int(time.time() * 1000),
                                 "callSid": current_call_sid
                             }, current_call_sid)
@@ -1022,6 +1283,8 @@ async def handle_media_stream(websocket: WebSocket):
                                 "messageType": "audio",
                                 "speaker": "Caller",
                                 "audio": payload_b64,
+                                "format": "mulaw",      # 📞 Phone quality mulaw from Twilio
+                                "sampleRate": 8000,     # 📞 8kHz (phone line limit)
                                 "timestamp": int(time.time() * 1000),
                                 "callSid": current_call_sid
                             }, current_call_sid)
@@ -1107,10 +1370,28 @@ async def handle_media_stream(websocket: WebSocket):
 
         async def handle_other_openai_event(response: dict):
             event_type = response.get('type', '')
-            
+
             # Log every event from OpenAI
             Log.info(f"[OpenAI Event] {event_type}")
-            
+
+            # 🔥 LATENCY TRACKING - Measure delay from VAD commit to first audio
+            if event_type == 'input_audio_buffer.committed':
+                import time
+                nonlocal connection_manager
+                connection_manager.state.vad_commit_time = time.time()
+                Log.info("⏱️ [LATENCY] VAD committed buffer - waiting for response...")
+            elif event_type == 'response.created':
+                import time
+                if hasattr(connection_manager.state, 'vad_commit_time'):
+                    delay = (time.time() - connection_manager.state.vad_commit_time) * 1000
+                    Log.info(f"⏱️ [LATENCY] Response created in {delay:.0f}ms after VAD commit")
+            elif event_type == 'response.audio.delta':
+                import time
+                if hasattr(connection_manager.state, 'vad_commit_time'):
+                    delay = (time.time() - connection_manager.state.vad_commit_time) * 1000
+                    Log.info(f"🔥 [LATENCY] First audio delta in {delay:.0f}ms after VAD commit")
+                    delattr(connection_manager.state, 'vad_commit_time')  # Clear to avoid duplicate logs
+
             if event_type == 'session.created':
                 Log.info("✅ [OpenAI] Session created successfully")
             elif event_type == 'session.updated':
@@ -1125,10 +1406,10 @@ async def handle_media_stream(websocket: WebSocket):
                 Log.debug(f"[OpenAI] ✅ Response complete")
             elif event_type == 'error':
                 Log.error(f"[OpenAI] ❌ Error event: {response}")
-            
+
             openai_service.process_event_for_logging(response)
             await openai_service.extract_caller_transcript(response)
-            
+
             if not openai_service.is_human_in_control():
                 await openai_service.extract_ai_transcript(response)
 
@@ -1161,7 +1442,24 @@ async def handle_media_stream(websocket: WebSocket):
             
             current_call_sid = getattr(connection_manager.state, 'call_sid', stream_sid)
             Log.event("Twilio Start", {"streamSid": stream_sid, "callSid": current_call_sid})
-            
+
+            # 🎙️ Start call recording via Twilio REST API (once per call)
+            if Config.has_twilio_credentials():
+                try:
+                    from twilio.rest import Client
+                    client = Client(Config.TWILIO_ACCOUNT_SID, Config.TWILIO_AUTH_TOKEN)
+
+                    # Start recording the call
+                    recording = client.calls(current_call_sid).recordings.create(
+                        recording_status_callback=f'https://{websocket.url.hostname}/recording-status',
+                        recording_status_callback_method='POST',
+                        recording_status_callback_event=['completed']
+                    )
+
+                    Log.info(f"🎙️ Started call recording via API: {recording.sid}")
+                except Exception as e:
+                    Log.error(f"❌ Failed to start call recording: {e}")
+
             # Find demo session AND restaurant_id
             for sid, data in demo_sessions.items():
                 if data.get('call_sid') == current_call_sid:
@@ -1176,6 +1474,8 @@ async def handle_media_stream(websocket: WebSocket):
                         "messageType": "callStarted",
                         "callSid": current_call_sid,
                         "sessionId": demo_session_id,
+                        "phoneNumber": data.get('phone'),  # Caller's phone number
+                        "restaurantId": restaurant_id,
                         "timestamp": int(time.time() * 1000)
                     }, current_call_sid)
                     

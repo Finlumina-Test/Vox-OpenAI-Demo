@@ -134,7 +134,7 @@ class OpenAISessionManager:
 
                 "audio": {
                     "input": {
-                        "format": {"type": "audio/pcmu"},
+                        "format": {"type": "audio/pcmu"},  # 📞 Mulaw 8kHz from Twilio
                         "turn_detection": {
                             "type": "server_vad",
                             "threshold": 0.4,  # 🔥 More aggressive (lower = triggers easier)
@@ -145,7 +145,7 @@ class OpenAISessionManager:
                             "model": "whisper-1",
                         }
                     },
-                    "output": {"format": {"type": "audio/pcmu"}}
+                    "output": {"format": {"type": "audio/pcmu"}}  # 📞 Mulaw 8kHz for phone compatibility
                 },
 
                 "instructions": (
@@ -384,6 +384,9 @@ class OpenAIService:
         """
         Send human agent audio to OpenAI for transcription/context.
         This keeps OpenAI aware of the conversation even during human takeover.
+
+        Audio is appended to buffer - OpenAI's server VAD will auto-commit
+        when it detects speech (no manual commit needed).
         """
         try:
             if connection_manager.is_openai_connected():
@@ -391,13 +394,8 @@ class OpenAIService:
                     "type": "input_audio_buffer.append",
                     "audio": audio_base64
                 })
-                
-                # ✅ Manually commit the audio for transcription
-                await connection_manager.send_to_openai({
-                    "type": "input_audio_buffer.commit"
-                })
-                
-                Log.debug("[HumanAudio] Sent to OpenAI for transcription")
+
+                Log.debug("[HumanAudio] Audio chunk appended (VAD will auto-commit)")
         except Exception as e:
             Log.error(f"Failed to send human audio to OpenAI: {e}")
 
