@@ -1334,6 +1334,11 @@ async def handle_media_stream(websocket: WebSocket):
                                     connection_manager.state.stream_sid
                                 )
                                 await connection_manager.send_to_twilio(mark_msg)
+
+                                # 🔥 Track when we SEND the mark to Twilio (to measure round-trip)
+                                if hasattr(connection_manager.state, 'speech_stopped_time') and not hasattr(connection_manager.state, 'first_mark_sent_time'):
+                                    connection_manager.state.first_mark_sent_time = time.time()
+                                    Log.info(f"📤 [LATENCY] First mark SENT to Twilio")
                         except Exception as e:
                             Log.error(f"[audio->twilio] failed: {e}")
 
@@ -1570,10 +1575,19 @@ async def handle_media_stream(websocket: WebSocket):
             twilio_connected.set()
 
         async def on_mark_cb():
+            import time
             try:
+                # 🔥 Track when Twilio RETURNS the mark (means audio was played!)
+                if hasattr(connection_manager.state, 'first_mark_sent_time') and not hasattr(connection_manager.state, 'first_mark_received'):
+                    mark_roundtrip = (time.time() - connection_manager.state.first_mark_sent_time) * 1000
+                    total_from_speech = (time.time() - connection_manager.state.speech_stopped_time) * 1000
+                    Log.info(f"📥 [LATENCY] First mark RECEIVED from Twilio after {mark_roundtrip:.0f}ms")
+                    Log.info(f"🎯 [LATENCY] TOTAL from speech stopped to Twilio playback: {total_from_speech:.0f}ms")
+                    connection_manager.state.first_mark_received = True
+
                 audio_service.handle_mark_event()
-            except Exception:
-                pass
+            except Exception as e:
+                Log.error(f"[Mark] Error: {e}")
 
         # 🔥 CRITICAL FIX: Start Twilio receiver FIRST
         Log.info("🚀 Starting Twilio receiver...")
