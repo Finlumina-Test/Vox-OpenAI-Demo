@@ -1322,6 +1322,7 @@ async def handle_media_stream(websocket: WebSocket):
                                     except:
                                         Log.info(f"📞 [LATENCY] First audio SENT TO TWILIO in {total_to_twilio:.0f}ms from speech stopped")
                                     connection_manager.state.first_audio_sent = True
+                                    connection_manager.state.first_audio_sent_ms = total_to_twilio  # Save for dashboard metrics
                                     connection_manager.state.audio_chunk_count = 1
                                 elif hasattr(connection_manager.state, 'audio_chunk_count'):
                                     connection_manager.state.audio_chunk_count += 1
@@ -1581,9 +1582,51 @@ async def handle_media_stream(websocket: WebSocket):
                 if hasattr(connection_manager.state, 'first_mark_sent_time') and not hasattr(connection_manager.state, 'first_mark_received'):
                     mark_roundtrip = (time.time() - connection_manager.state.first_mark_sent_time) * 1000
                     total_from_speech = (time.time() - connection_manager.state.speech_stopped_time) * 1000
+
+                    # Calculate component times
+                    ai_processing_ms = getattr(connection_manager.state, 'first_audio_sent_ms', 0)
+                    network_delay_ms = total_from_speech - ai_processing_ms
+
                     Log.info(f"📥 [LATENCY] First mark RECEIVED from Twilio after {mark_roundtrip:.0f}ms")
                     Log.info(f"🎯 [LATENCY] TOTAL from speech stopped to Twilio playback: {total_from_speech:.0f}ms")
                     connection_manager.state.first_mark_received = True
+
+                    # 📊 Broadcast latency metrics to dashboard
+                    try:
+                        # Determine performance rating
+                        if ai_processing_ms < 500:
+                            performance_rating = "excellent"
+                        elif ai_processing_ms < 800:
+                            performance_rating = "good"
+                        else:
+                            performance_rating = "fair"
+
+                        # Determine region based on network delay
+                        if network_delay_ms < 500:
+                            region = "local"
+                        elif network_delay_ms < 1000:
+                            region = "domestic"
+                        else:
+                            region = "international"
+
+                        latency_metrics = {
+                            "messageType": "latencyMetrics",
+                            "callSid": current_call_sid,
+                            "timestamp": int(time.time() * 1000),
+                            "metrics": {
+                                "aiProcessingMs": round(ai_processing_ms),
+                                "networkDelayMs": round(network_delay_ms),
+                                "totalLatencyMs": round(total_from_speech),
+                                "markRoundtripMs": round(mark_roundtrip),
+                                "performanceRating": performance_rating,
+                                "region": region
+                            }
+                        }
+
+                        broadcast_to_dashboards_nonblocking(latency_metrics, current_call_sid)
+                        Log.info(f"📊 [Dashboard] Sent latency metrics: AI={ai_processing_ms:.0f}ms, Network={network_delay_ms:.0f}ms, Total={total_from_speech:.0f}ms")
+                    except Exception as e:
+                        Log.error(f"[Dashboard] Failed to broadcast latency metrics: {e}")
 
                 audio_service.handle_mark_event()
             except Exception as e:
