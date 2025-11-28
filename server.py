@@ -1274,7 +1274,6 @@ async def handle_media_stream(websocket: WebSocket):
                                 audio_message = audio_service.process_incoming_audio(data)
                                 if audio_message:
                                     await connection_manager.send_to_openai(audio_message)
-                                    Log.debug(f"[media] 🎤 Sent caller audio to OpenAI")
                             except Exception as e:
                                 Log.error(f"[media] failed to send to OpenAI: {e}")
                         
@@ -1296,9 +1295,8 @@ async def handle_media_stream(websocket: WebSocket):
                 
                 audio_data = openai_service.extract_audio_response_data(response) or {}
                 delta = audio_data.get("delta")
-                
+
                 if delta:
-                    Log.debug(f"[audio-delta] 🔊 Received AI audio delta")
                     should_send_to_dashboard = True
                     
                     if getattr(connection_manager.state, "stream_sid", None):
@@ -1312,7 +1310,6 @@ async def handle_media_stream(websocket: WebSocket):
                                     connection_manager.state.stream_sid
                                 )
                                 await connection_manager.send_to_twilio(mark_msg)
-                                Log.debug(f"[audio-delta] 📞 Sent AI audio to Twilio")
                         except Exception as e:
                             Log.error(f"[audio->twilio] failed: {e}")
                     
@@ -1371,8 +1368,22 @@ async def handle_media_stream(websocket: WebSocket):
         async def handle_other_openai_event(response: dict):
             event_type = response.get('type', '')
 
-            # Log every event from OpenAI
-            Log.info(f"[OpenAI Event] {event_type}")
+            # Filter out spammy/repetitive events from logs
+            spammy_events = {
+                'response.output_audio_transcript.delta',
+                'response.output_audio_transcript.done',
+                'conversation.item.added',
+                'conversation.item.done',
+                'response.audio.delta',
+                'response.audio_transcript.delta',
+                'response.audio_transcript.done',
+                'conversation.item.input_audio_transcription.completed',
+                'response.done'
+            }
+
+            # Only log important events (not spammy ones)
+            if event_type not in spammy_events:
+                Log.info(f"[OpenAI Event] {event_type}")
 
             # 🔥 LATENCY TRACKING - Measure delay from VAD commit to first audio
             if event_type == 'input_audio_buffer.committed':
