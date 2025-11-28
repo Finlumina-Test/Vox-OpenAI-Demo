@@ -363,10 +363,46 @@ async def demo_rating(request: Request):
         response.hangup()
         return Response(content=str(response), media_type="application/xml")
 
-@app.api_route("/call-status", methods=["POST"])
+@app.api_route("/call-status", methods=["GET", "POST"])
 async def handle_call_status(request: Request):
-    """Handle Twilio call status callbacks (hangup tracking)."""
+    """
+    Handle call status:
+    - GET: Frontend check if call has ended (returns JSON)
+    - POST: Twilio status callback (hangup tracking)
+    """
     try:
+        # GET request from frontend - check if call has ended
+        if request.method == "GET":
+            call_sid = request.query_params.get('callSid')
+
+            if not call_sid:
+                return JSONResponse({"error": "Missing callSid parameter"}, status_code=400)
+
+            # Check if call is still active in active_calls
+            is_active = call_sid in active_calls
+
+            # Check if call ended (exists in demo_sessions but not in active_calls)
+            session_data = None
+            for sid, data in demo_sessions.items():
+                if data.get('call_sid') == call_sid:
+                    session_data = data
+                    break
+
+            # Also check pending sessions
+            if not session_data:
+                for sid, data in demo_pending_start.items():
+                    if data.get('call_sid') == call_sid:
+                        session_data = data
+                        break
+
+            return JSONResponse({
+                "callSid": call_sid,
+                "isActive": is_active,
+                "hasEnded": not is_active and session_data is not None,
+                "exists": session_data is not None
+            })
+
+        # POST request from Twilio - status callback
         Log.info("=" * 80)
         Log.info("🔥 CALL STATUS CALLBACK RECEIVED")
         Log.info("=" * 80)
@@ -443,13 +479,109 @@ async def handle_call_status(request: Request):
         
         Log.info("=" * 80)
         return Response(content="OK", status_code=200)
-        
+
     except Exception as e:
         Log.error(f"[StatusCallback] Error: {e}")
         import traceback
         Log.error(f"Traceback: {traceback.format_exc()}")
         return Response(content="ERROR", status_code=200)
-        
+
+
+@app.api_route("/recording-status", methods=["POST"])
+async def handle_recording_status(request: Request):
+    """
+    Handle Twilio recording status callback.
+    Stores recording URL in Supabase when recording is completed.
+    """
+    try:
+        form_data = await request.form()
+
+        Log.info("=" * 80)
+        Log.info("🎙️ RECORDING STATUS CALLBACK RECEIVED")
+        Log.info("=" * 80)
+
+        # Log all form data for debugging
+        Log.info(f"📋 Recording callback data: {dict(form_data)}")
+
+        # Extract recording data
+        recording_sid = form_data.get('RecordingSid')
+        recording_url = form_data.get('RecordingUrl')
+        recording_status = form_data.get('RecordingStatus')
+        call_sid = form_data.get('CallSid')
+        recording_duration = form_data.get('RecordingDuration', '0')
+
+        Log.info(f"🎙️ RecordingSid: {recording_sid}")
+        Log.info(f"🎙️ RecordingUrl: {recording_url}")
+        Log.info(f"🎙️ Status: {recording_status}")
+        Log.info(f"🎙️ CallSid: {call_sid}")
+        Log.info(f"🎙️ Duration: {recording_duration}s")
+
+        # Only process completed recordings
+        if recording_status == 'completed' and recording_url:
+            # Add .mp3 extension to URL for direct download
+            full_recording_url = f"{recording_url}.mp3"
+
+            Log.info(f"✅ Recording completed: {full_recording_url}")
+
+            # Find session data for this call
+            session_id = None
+            session_data = None
+
+            for sid, data in demo_sessions.items():
+                if data.get('call_sid') == call_sid:
+                    session_id = sid
+                    session_data = data
+                    break
+
+            if not session_data:
+                for sid, data in demo_pending_start.items():
+                    if data.get('call_sid') == call_sid:
+                        session_id = sid
+                        session_data = data
+                        break
+
+            # Store in Supabase if configured
+            if Config.has_supabase_configured():
+                try:
+                    from supabase import create_client
+
+                    supabase = create_client(Config.SUPABASE_URL, Config.SUPABASE_KEY)
+
+                    # Prepare data for Supabase
+                    recording_data = {
+                        'recording_sid': recording_sid,
+                        'recording_url': full_recording_url,
+                        'call_sid': call_sid,
+                        'session_id': session_id,
+                        'duration_seconds': int(recording_duration) if recording_duration else 0,
+                        'phone': session_data.get('phone') if session_data else None,
+                        'restaurant_id': session_data.get('restaurant_id') if session_data else None,
+                        'created_at': 'now()'
+                    }
+
+                    # Insert into Supabase
+                    result = supabase.table(Config.SUPABASE_TABLE).insert(recording_data).execute()
+
+                    Log.info(f"✅ Recording stored in Supabase: {recording_sid}")
+                    Log.info(f"📊 Supabase response: {result}")
+
+                except Exception as e:
+                    Log.error(f"❌ Failed to store recording in Supabase: {e}")
+                    import traceback
+                    Log.error(f"Traceback: {traceback.format_exc()}")
+            else:
+                Log.warning("⚠️ Supabase not configured - recording URL not stored")
+                Log.warning(f"💡 Recording URL: {full_recording_url}")
+
+        Log.info("=" * 80)
+        return Response(content="OK", status_code=200)
+
+    except Exception as e:
+        Log.error(f"[RecordingCallback] Error: {e}")
+        import traceback
+        Log.error(f"Traceback: {traceback.format_exc()}")
+        return Response(content="ERROR", status_code=200)
+
 
 @app.get("/api/validate-session/{session_id}")
 async def validate_session(session_id: str):
@@ -898,17 +1030,20 @@ async def handle_media_stream(websocket: WebSocket):
                 audio_b64 = audio_data.get("audio", "")
                 try:
                     audio_bytes = base64.b64decode(audio_b64)
+                    # 📞 mulaw at 8kHz: 8000 samples/sec * 1 byte/sample = 8000 bytes/sec
                     duration_seconds = len(audio_bytes) / 8000.0
                 except Exception as e:
                     duration_seconds = 0.02
-                
+
                 ai_currently_speaking = True
-                
+
                 if current_call_sid:
                     broadcast_to_dashboards_nonblocking({
                         "messageType": "audio",
                         "speaker": "AI",
                         "audio": audio_b64,
+                        "format": "mulaw",      # 📞 Mulaw from OpenAI (frontend upsamples)
+                        "sampleRate": 8000,     # 📞 8kHz
                         "timestamp": audio_data.get("timestamp", int(time.time() * 1000)),
                         "callSid": current_call_sid,
                     }, current_call_sid)
@@ -1004,6 +1139,8 @@ async def handle_media_stream(websocket: WebSocket):
                                 "messageType": "audio",
                                 "speaker": "Caller",
                                 "audio": payload_b64,
+                                "format": "mulaw",      # 📞 Phone quality mulaw from Twilio
+                                "sampleRate": 8000,     # 📞 8kHz (phone line limit)
                                 "timestamp": int(time.time() * 1000),
                                 "callSid": current_call_sid
                             }, current_call_sid)
@@ -1022,6 +1159,8 @@ async def handle_media_stream(websocket: WebSocket):
                                 "messageType": "audio",
                                 "speaker": "Caller",
                                 "audio": payload_b64,
+                                "format": "mulaw",      # 📞 Phone quality mulaw from Twilio
+                                "sampleRate": 8000,     # 📞 8kHz (phone line limit)
                                 "timestamp": int(time.time() * 1000),
                                 "callSid": current_call_sid
                             }, current_call_sid)
