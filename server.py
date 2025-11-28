@@ -1385,12 +1385,20 @@ async def handle_media_stream(websocket: WebSocket):
             if event_type not in spammy_events:
                 Log.info(f"[OpenAI Event] {event_type}")
 
-            # 🔥 LATENCY TRACKING - Measure delay from VAD commit to first audio
-            if event_type == 'input_audio_buffer.committed':
+            # 🔥 END-TO-END LATENCY TRACKING
+            if event_type == 'input_audio_buffer.speech_stopped':
                 import time
                 nonlocal connection_manager
+                connection_manager.state.speech_stopped_time = time.time()
+                Log.info("🔇 [LATENCY] User stopped speaking - VAD detecting silence...")
+            elif event_type == 'input_audio_buffer.committed':
+                import time
                 connection_manager.state.vad_commit_time = time.time()
-                Log.info("⏱️ [LATENCY] VAD committed buffer - waiting for response...")
+                if hasattr(connection_manager.state, 'speech_stopped_time'):
+                    delay = (time.time() - connection_manager.state.speech_stopped_time) * 1000
+                    Log.info(f"⏱️ [LATENCY] VAD committed in {delay:.0f}ms after speech stopped")
+                else:
+                    Log.info("⏱️ [LATENCY] VAD committed buffer - waiting for response...")
             elif event_type == 'response.created':
                 import time
                 if hasattr(connection_manager.state, 'vad_commit_time'):
@@ -1399,9 +1407,16 @@ async def handle_media_stream(websocket: WebSocket):
             elif event_type == 'response.audio.delta':
                 import time
                 if hasattr(connection_manager.state, 'vad_commit_time'):
-                    delay = (time.time() - connection_manager.state.vad_commit_time) * 1000
-                    Log.info(f"🔥 [LATENCY] First audio delta in {delay:.0f}ms after VAD commit")
-                    delattr(connection_manager.state, 'vad_commit_time')  # Clear to avoid duplicate logs
+                    vad_delay = (time.time() - connection_manager.state.vad_commit_time) * 1000
+                    Log.info(f"🔥 [LATENCY] First audio delta in {vad_delay:.0f}ms after VAD commit")
+
+                    # Calculate total end-to-end latency
+                    if hasattr(connection_manager.state, 'speech_stopped_time'):
+                        total_delay = (time.time() - connection_manager.state.speech_stopped_time) * 1000
+                        Log.info(f"✅ [LATENCY] END-TO-END: {total_delay:.0f}ms from speech stopped to first audio")
+                        delattr(connection_manager.state, 'speech_stopped_time')
+
+                    delattr(connection_manager.state, 'vad_commit_time')
 
             if event_type == 'session.created':
                 Log.info("✅ [OpenAI] Session created successfully")

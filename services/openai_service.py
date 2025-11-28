@@ -137,9 +137,9 @@ class OpenAISessionManager:
                         "format": {"type": "audio/pcmu"},  # 📞 Mulaw 8kHz from Twilio
                         "turn_detection": {
                             "type": "server_vad",
-                            "threshold": 0.4,  # 🔥 More aggressive (lower = triggers easier)
-                            "prefix_padding_ms": 200,  # Less padding for faster detection
-                            "silence_duration_ms": 300  # 🔥 Very fast interruption
+                            "threshold": 0.5,  # 🔥 Balanced sensitivity
+                            "prefix_padding_ms": 100,  # Minimal padding for speed
+                            "silence_duration_ms": 200  # 🔥 Ultra-fast detection (200ms)
                         },
                         "transcription": {
                             "model": "whisper-1",
