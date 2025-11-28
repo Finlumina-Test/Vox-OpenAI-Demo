@@ -1370,10 +1370,28 @@ async def handle_media_stream(websocket: WebSocket):
 
         async def handle_other_openai_event(response: dict):
             event_type = response.get('type', '')
-            
+
             # Log every event from OpenAI
             Log.info(f"[OpenAI Event] {event_type}")
-            
+
+            # 🔥 LATENCY TRACKING - Measure delay from VAD commit to first audio
+            if event_type == 'input_audio_buffer.committed':
+                import time
+                nonlocal connection_manager
+                connection_manager.state.vad_commit_time = time.time()
+                Log.info("⏱️ [LATENCY] VAD committed buffer - waiting for response...")
+            elif event_type == 'response.created':
+                import time
+                if hasattr(connection_manager.state, 'vad_commit_time'):
+                    delay = (time.time() - connection_manager.state.vad_commit_time) * 1000
+                    Log.info(f"⏱️ [LATENCY] Response created in {delay:.0f}ms after VAD commit")
+            elif event_type == 'response.audio.delta':
+                import time
+                if hasattr(connection_manager.state, 'vad_commit_time'):
+                    delay = (time.time() - connection_manager.state.vad_commit_time) * 1000
+                    Log.info(f"🔥 [LATENCY] First audio delta in {delay:.0f}ms after VAD commit")
+                    delattr(connection_manager.state, 'vad_commit_time')  # Clear to avoid duplicate logs
+
             if event_type == 'session.created':
                 Log.info("✅ [OpenAI] Session created successfully")
             elif event_type == 'session.updated':
@@ -1388,10 +1406,10 @@ async def handle_media_stream(websocket: WebSocket):
                 Log.debug(f"[OpenAI] ✅ Response complete")
             elif event_type == 'error':
                 Log.error(f"[OpenAI] ❌ Error event: {response}")
-            
+
             openai_service.process_event_for_logging(response)
             await openai_service.extract_caller_transcript(response)
-            
+
             if not openai_service.is_human_in_control():
                 await openai_service.extract_ai_transcript(response)
 
