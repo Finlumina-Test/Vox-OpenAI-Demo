@@ -1250,65 +1250,7 @@ async def handle_media_stream(websocket: WebSocket):
                     connection_manager.state.first_media_received_time = current_time
                     connection_manager.state.packet_count = 0
                     connection_manager.state.packet_times = []
-
-                    # 🔥 USE TWILIO'S TIMESTAMP to calculate EXACT network latency!
-                    twilio_timestamp = media.get("timestamp")
-                    if twilio_timestamp:
-                        # Twilio timestamp is in milliseconds since epoch
-                        twilio_time_seconds = int(twilio_timestamp) / 1000
-                        server_time_seconds = current_time
-                        network_latency_ms = (server_time_seconds - twilio_time_seconds) * 1000
-
-                        Log.info("=" * 70)
-                        Log.info(f"📥 [LATENCY] First audio RECEIVED from Twilio")
-                        Log.info(f"  🕐 Twilio captured audio at: {twilio_timestamp} ({twilio_time_seconds:.3f}s)")
-                        Log.info(f"  🕐 Server received at: {server_time_seconds:.3f}s")
-                        Log.info(f"  📡 EXACT network latency (Twilio → Server): {network_latency_ms:.2f}ms")
-                        Log.info(f"      (This is MEASURED, not estimated!)")
-                        Log.info("=" * 70)
-
-                        # Save for later calculations
-                        connection_manager.state.measured_inbound_latency_ms = network_latency_ms
-                    else:
-                        Log.info(f"📥 [LATENCY] First audio RECEIVED from Twilio (caller started speaking)")
-
-                    # 🧪 Run latency calibration test if enabled (after first audio confirms path works)
-                    if Config.ENABLE_LATENCY_CALIBRATION and not hasattr(connection_manager.state, 'latency_calibration_done'):
-                        connection_manager.state.latency_calibration_done = True
-                        connection_manager.state.latency_calibration_running = True
-                        Log.info("=" * 70)
-                        Log.info("🧪 LATENCY CALIBRATION TEST STARTING...")
-                        Log.info("   AI will ask you to say 'ready' when you hear a beep")
-                        Log.info("=" * 70)
-
-                        # Send a calibration message via OpenAI
-                        try:
-                            # Clear any existing audio buffer first
-                            await connection_manager.send_to_openai({
-                                "type": "input_audio_buffer.clear"
-                            })
-
-                            calibration_message = {
-                                "type": "conversation.item.create",
-                                "item": {
-                                    "type": "message",
-                                    "role": "user",
-                                    "content": [
-                                        {
-                                            "type": "input_text",
-                                            "text": "Say exactly: 'Please say the word ready when you hear the beep. BEEP!'"
-                                        }
-                                    ]
-                                }
-                            }
-                            await connection_manager.send_to_openai(calibration_message)
-                            await connection_manager.send_to_openai({"type": "response.create"})
-
-                            # Track when we send the calibration beep
-                            connection_manager.state.calibration_beep_sent_time = time.time()
-                            Log.info("🔔 [CALIBRATION] Instruction sent to AI - waiting for caller to say 'ready'...")
-                        except Exception as e:
-                            Log.error(f"[CALIBRATION] Failed to send test: {e}")
+                    Log.info(f"📥 [LATENCY] First audio RECEIVED from Twilio (caller started speaking)")
 
                 # Track packet arrival patterns for network jitter analysis
                 connection_manager.state.packet_count += 1
