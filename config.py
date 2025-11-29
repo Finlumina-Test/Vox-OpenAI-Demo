@@ -42,6 +42,9 @@ class Config:
     # Demo Configuration
     DEMO_DURATION_SECONDS: int = int(os.getenv('DEMO_DURATION_SECONDS', '60'))
 
+    # Latency Testing Configuration
+    ENABLE_LATENCY_CALIBRATION: bool = os.getenv('ENABLE_LATENCY_CALIBRATION', 'false').lower() == 'true'
+
     # AI Assistant Configuration
     SYSTEM_MESSAGE: str = (
         "You are Vox (pronounced like 'vocks', rhymes with 'box' - NOT spelled out as V-O-X) - Finlumina's advanced multilingual voice assistant. "

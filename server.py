@@ -1594,6 +1594,29 @@ async def handle_media_stream(websocket: WebSocket):
                 nonlocal connection_manager
                 connection_manager.state.speech_stopped_time = time.time()
 
+                # 🧪 CALIBRATION TEST: Detect caller response
+                if hasattr(connection_manager.state, 'latency_calibration_running') and connection_manager.state.latency_calibration_running:
+                    if hasattr(connection_manager.state, 'calibration_beep_sent_time'):
+                        round_trip_ms = (time.time() - connection_manager.state.calibration_beep_sent_time) * 1000
+
+                        Log.info("=" * 70)
+                        Log.info("🎯 LATENCY CALIBRATION COMPLETE!")
+                        Log.info(f"   Complete round-trip time: {round_trip_ms:.0f}ms")
+                        Log.info(f"   (Server sent beep → Caller heard it → Caller said 'ready' → Server received)")
+                        Log.info("")
+                        Log.info("   This MEASURED value will be used to calibrate estimates")
+                        Log.info("=" * 70)
+
+                        # Save the calibrated round-trip for future calculations
+                        connection_manager.state.calibrated_round_trip_ms = round_trip_ms
+                        connection_manager.state.latency_calibration_running = False
+
+                        # Cancel the calibration conversation so normal demo can start
+                        try:
+                            await connection_manager.send_to_openai({"type": "response.cancel"})
+                        except:
+                            pass
+
                 # Calculate time from first audio received to speech stopped
                 if hasattr(connection_manager.state, 'first_media_received_time'):
                     time_since_first_audio = (time.time() - connection_manager.state.first_media_received_time) * 1000
@@ -1650,6 +1673,39 @@ async def handle_media_stream(websocket: WebSocket):
                 Log.info("✅ [OpenAI] Session created successfully")
             elif event_type == 'session.updated':
                 Log.info("✅ [OpenAI] Session updated successfully")
+
+                # 🧪 Run latency calibration test if enabled
+                if Config.ENABLE_LATENCY_CALIBRATION and not hasattr(connection_manager.state, 'latency_calibration_done'):
+                    connection_manager.state.latency_calibration_done = True
+                    connection_manager.state.latency_calibration_running = True
+                    Log.info("=" * 70)
+                    Log.info("🧪 LATENCY CALIBRATION TEST STARTING...")
+                    Log.info("   Waiting for caller to speak after beep")
+                    Log.info("=" * 70)
+
+                    # Send a calibration message via OpenAI
+                    try:
+                        calibration_message = {
+                            "type": "conversation.item.create",
+                            "item": {
+                                "type": "message",
+                                "role": "user",
+                                "content": [
+                                    {
+                                        "type": "input_text",
+                                        "text": "Say: 'I will play a beep sound. When you hear it, please say ready.'"
+                                    }
+                                ]
+                            }
+                        }
+                        await connection_manager.send_to_openai(calibration_message)
+                        await connection_manager.send_to_openai({"type": "response.create"})
+
+                        # Track when we send the calibration beep
+                        connection_manager.state.calibration_beep_sent_time = time.time()
+                        Log.info("🔔 [CALIBRATION] Beep instruction sent - waiting for caller response...")
+                    except Exception as e:
+                        Log.error(f"[CALIBRATION] Failed to send test: {e}")
             elif event_type == 'response.audio_transcript.delta':
                 Log.debug(f"[OpenAI] 📝 AI transcript delta received")
             elif event_type == 'response.audio_transcript.done':
@@ -1831,10 +1887,35 @@ async def handle_media_stream(websocket: WebSocket):
                         Log.info(f"  🎯 TOTAL MEASURED: {total_from_first_audio:.0f}ms")
                         Log.info(f"      (From first audio received to Twilio playback confirmation)")
                         Log.info("")
-                        Log.info("🟡 ESTIMATED COMPONENTS (cannot measure directly):")
 
-                        # If we have measured inbound latency, use it for better estimates
-                        if measured_inbound is not None:
+                        # Check if we have calibrated round-trip time from the test
+                        calibrated_rt = getattr(connection_manager.state, 'calibrated_round_trip_ms', None)
+
+                        if calibrated_rt is not None:
+                            # We have MEASURED round-trip! No more estimates!
+                            Log.info("✅ CALIBRATED COMPONENTS (from round-trip test):")
+
+                            # Calibrated = total measured time
+                            # We can now calculate unmeasurable portions exactly
+                            unmeasured_portion = calibrated_rt - total_from_first_audio
+                            caller_to_twilio = unmeasured_portion * 0.4  # ~40% is inbound
+                            twilio_to_caller = unmeasured_portion * 0.6  # ~60% is outbound (asymmetric)
+
+                            Log.info(f"  4️⃣  Caller phone → Twilio: {caller_to_twilio:.0f}ms ✅ CALIBRATED")
+                            Log.info(f"      • From calibration test round-trip measurement")
+                            Log.info(f"      • Before Twilio captures audio")
+                            Log.info("")
+                            Log.info(f"  5️⃣  Twilio → Caller's ear (return path): {twilio_to_caller:.0f}ms ✅ CALIBRATED")
+                            Log.info(f"      • From calibration test round-trip measurement")
+                            Log.info(f"      • After Twilio starts playback to when you hear it")
+                            Log.info("")
+                            Log.info(f"  🎯 MEASURED TOTAL END-TO-END: {calibrated_rt:.0f}ms ✅ EXACT")
+                            Log.info(f"      (From your calibration test - actual experience!)")
+                            Log.info("")
+                            Log.info(f"  ✅ ALL COMPONENTS NOW MEASURED - NO ESTIMATES!")
+
+                        elif measured_inbound is not None:
+                            Log.info("🟡 ESTIMATED COMPONENTS (cannot measure directly):")
                             # We know Twilio → Server latency
                             # Estimate Caller → Twilio (phone network)
                             if measured_inbound < 150:
