@@ -1239,6 +1239,13 @@ async def handle_media_stream(websocket: WebSocket):
         Log.info("🎯 Step 3: Waiting for Twilio stream to start...")
 
         async def handle_media_event(data: dict):
+            import time
+
+            # 🔥 TIMESTAMP: Track when we FIRST receive audio from Twilio
+            if data.get("event") == "media" and not hasattr(connection_manager.state, 'first_media_received_time'):
+                connection_manager.state.first_media_received_time = time.time()
+                Log.info(f"📥 [LATENCY] First audio RECEIVED from Twilio (caller started speaking)")
+
             if data.get("event") == "media":
                 media = data.get("media") or {}
                 payload_b64 = media.get("payload")
@@ -1420,7 +1427,13 @@ async def handle_media_stream(websocket: WebSocket):
             if event_type == 'input_audio_buffer.speech_stopped':
                 nonlocal connection_manager
                 connection_manager.state.speech_stopped_time = time.time()
-                Log.info("🔇 [LATENCY] User stopped speaking - VAD detecting silence...")
+
+                # Calculate time from first audio received to speech stopped
+                if hasattr(connection_manager.state, 'first_media_received_time'):
+                    time_since_first_audio = (time.time() - connection_manager.state.first_media_received_time) * 1000
+                    Log.info(f"🔇 [LATENCY] Speech stopped detected {time_since_first_audio:.0f}ms after first audio received")
+                else:
+                    Log.info("🔇 [LATENCY] User stopped speaking - VAD detecting silence...")
             elif event_type == 'input_audio_buffer.committed':
                 connection_manager.state.vad_commit_time = time.time()
                 if hasattr(connection_manager.state, 'speech_stopped_time'):
@@ -1589,6 +1602,27 @@ async def handle_media_stream(websocket: WebSocket):
 
                     Log.info(f"📥 [LATENCY] First mark RECEIVED from Twilio after {mark_roundtrip:.0f}ms")
                     Log.info(f"🎯 [LATENCY] TOTAL from speech stopped to Twilio playback: {total_from_speech:.0f}ms")
+
+                    # 📊 COMPREHENSIVE LATENCY BREAKDOWN
+                    if hasattr(connection_manager.state, 'first_media_received_time'):
+                        total_from_first_audio = (time.time() - connection_manager.state.first_media_received_time) * 1000
+                        caller_to_vad = total_from_first_audio - total_from_speech
+
+                        Log.info("=" * 60)
+                        Log.info("📊 COMPLETE LATENCY BREAKDOWN:")
+                        Log.info(f"  1️⃣  Caller starts → Server receives audio: ~{caller_to_vad:.0f}ms")
+                        Log.info(f"      (Caller phone → Twilio → Server)")
+                        Log.info(f"  2️⃣  Server processing (VAD → First audio sent): {ai_processing_ms:.0f}ms")
+                        Log.info(f"      (Your server + OpenAI processing)")
+                        Log.info(f"  3️⃣  Twilio confirms playback started: {mark_roundtrip:.0f}ms")
+                        Log.info(f"      (Twilio jitter buffer)")
+                        Log.info(f"  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+                        Log.info(f"  🎯 TOTAL (from first audio to playback): {total_from_first_audio:.0f}ms")
+                        Log.info(f"  ⚠️  ESTIMATE: Add ~300-500ms for caller audio to reach server")
+                        Log.info(f"  ⚠️  ESTIMATE: Add ~500-1500ms for audio to reach caller's ear")
+                        Log.info(f"      (Varies HEAVILY by region: ~500ms US, ~1500ms international)")
+                        Log.info("=" * 60)
+
                     connection_manager.state.first_mark_received = True
 
                     # 📊 Broadcast latency metrics to dashboard
