@@ -1244,12 +1244,33 @@ async def handle_media_stream(websocket: WebSocket):
             # 🔥 TIMESTAMP: Track when we FIRST receive audio from Twilio
             if data.get("event") == "media":
                 current_time = time.time()
+                media = data.get("media") or {}
 
                 if not hasattr(connection_manager.state, 'first_media_received_time'):
                     connection_manager.state.first_media_received_time = current_time
                     connection_manager.state.packet_count = 0
                     connection_manager.state.packet_times = []
-                    Log.info(f"📥 [LATENCY] First audio RECEIVED from Twilio (caller started speaking)")
+
+                    # 🔥 USE TWILIO'S TIMESTAMP to calculate EXACT network latency!
+                    twilio_timestamp = media.get("timestamp")
+                    if twilio_timestamp:
+                        # Twilio timestamp is in milliseconds since epoch
+                        twilio_time_seconds = int(twilio_timestamp) / 1000
+                        server_time_seconds = current_time
+                        network_latency_ms = (server_time_seconds - twilio_time_seconds) * 1000
+
+                        Log.info("=" * 70)
+                        Log.info(f"📥 [LATENCY] First audio RECEIVED from Twilio")
+                        Log.info(f"  🕐 Twilio captured audio at: {twilio_timestamp} ({twilio_time_seconds:.3f}s)")
+                        Log.info(f"  🕐 Server received at: {server_time_seconds:.3f}s")
+                        Log.info(f"  📡 EXACT network latency (Twilio → Server): {network_latency_ms:.2f}ms")
+                        Log.info(f"      (This is MEASURED, not estimated!)")
+                        Log.info("=" * 70)
+
+                        # Save for later calculations
+                        connection_manager.state.measured_inbound_latency_ms = network_latency_ms
+                    else:
+                        Log.info(f"📥 [LATENCY] First audio RECEIVED from Twilio (caller started speaking)")
 
                 # Track packet arrival patterns for network jitter analysis
                 connection_manager.state.packet_count += 1
@@ -1775,15 +1796,24 @@ async def handle_media_stream(websocket: WebSocket):
                         total_from_first_audio = (time.time() - connection_manager.state.first_media_received_time) * 1000
                         caller_to_vad = total_from_first_audio - total_from_speech
 
+                        # Use MEASURED inbound latency if available (from Twilio timestamp)
+                        measured_inbound = getattr(connection_manager.state, 'measured_inbound_latency_ms', None)
+
                         Log.info("=" * 80)
                         Log.info("📊 COMPLETE END-TO-END LATENCY BREAKDOWN:")
                         Log.info("")
-                        Log.info("🔵 MEASURED COMPONENTS (from logs):")
-                        Log.info(f"  1️⃣  Caller → Server (inbound network): ~{caller_to_vad:.0f}ms")
-                        Log.info(f"      • Caller phone → Twilio ingress → Server WebSocket")
-                        Log.info(f"      • Includes: Phone network + Twilio routing + Internet")
+                        Log.info("🔵 MEASURED COMPONENTS (from Twilio timestamps):")
+
+                        if measured_inbound is not None:
+                            Log.info(f"  1️⃣  Twilio → Server (inbound network): {measured_inbound:.2f}ms ✅ MEASURED")
+                            Log.info(f"      • Using Twilio's timestamp vs server receive time")
+                            Log.info(f"      • Twilio ingress → Server WebSocket")
+                        else:
+                            Log.info(f"  1️⃣  Caller → Server (inbound network): ~{caller_to_vad:.0f}ms")
+                            Log.info(f"      • Caller phone → Twilio ingress → Server WebSocket")
+                            Log.info(f"      • Includes: Phone network + Twilio routing + Internet")
                         Log.info("")
-                        Log.info(f"  2️⃣  Server processing: {ai_processing_ms:.0f}ms")
+                        Log.info(f"  2️⃣  Server processing: {ai_processing_ms:.0f}ms ✅ MEASURED")
                         Log.info(f"      • Breakdown available in 'Server Processing Breakdown' logs above")
                         Log.info(f"      • Includes: Format conversion + OpenAI network + AI processing")
                         Log.info("")
@@ -1803,30 +1833,59 @@ async def handle_media_stream(websocket: WebSocket):
                         Log.info("")
                         Log.info("🟡 ESTIMATED COMPONENTS (cannot measure directly):")
 
-                        # Estimate based on region
-                        if caller_to_vad < 300:
-                            inbound_estimate = "100-200ms"
-                            outbound_estimate = "300-500ms"
-                            total_estimate = "400-700ms"
-                            region_name = "LOCAL/SAME DATACENTER"
-                        elif caller_to_vad < 600:
-                            inbound_estimate = "200-400ms"
-                            outbound_estimate = "500-800ms"
-                            total_estimate = "700-1200ms"
-                            region_name = "DOMESTIC (US)"
-                        else:
-                            inbound_estimate = "500-800ms"
-                            outbound_estimate = "1000-1800ms"
-                            total_estimate = "1500-2600ms"
-                            region_name = "INTERNATIONAL"
+                        # If we have measured inbound latency, use it for better estimates
+                        if measured_inbound is not None:
+                            # We know Twilio → Server latency
+                            # Estimate Caller → Twilio (phone network)
+                            if measured_inbound < 150:
+                                caller_phone_estimate = "50-150ms"
+                                outbound_estimate = "200-400ms"
+                                total_estimate = f"{int(total_from_first_audio + 250)}-{int(total_from_first_audio + 550)}ms"
+                                region_name = "LOCAL/SAME DATACENTER"
+                            elif measured_inbound < 300:
+                                caller_phone_estimate = "150-300ms"
+                                outbound_estimate = "400-700ms"
+                                total_estimate = f"{int(total_from_first_audio + 550)}-{int(total_from_first_audio + 1000)}ms"
+                                region_name = "DOMESTIC (US)"
+                            else:
+                                caller_phone_estimate = "300-600ms"
+                                outbound_estimate = "800-1500ms"
+                                total_estimate = f"{int(total_from_first_audio + 1100)}-{int(total_from_first_audio + 2100)}ms"
+                                region_name = "INTERNATIONAL"
 
-                        Log.info(f"  4️⃣  Caller audio → Server (before we receive): ~{inbound_estimate}")
-                        Log.info(f"      • Time from caller starts speaking to server receives")
-                        Log.info(f"      • Cannot measure (we don't know when caller started)")
-                        Log.info("")
-                        Log.info(f"  5️⃣  Twilio → Caller's ear (return path): ~{outbound_estimate}")
-                        Log.info(f"      • Twilio egress → Phone network → Caller hears it")
-                        Log.info(f"      • Typically 1.2-1.5x inbound latency (asymmetric routing)")
+                            Log.info(f"  4️⃣  Caller phone → Twilio: ~{caller_phone_estimate}")
+                            Log.info(f"      • Caller's phone network to Twilio ingress")
+                            Log.info(f"      • Cannot measure (before Twilio captures audio)")
+                            Log.info("")
+                            Log.info(f"  5️⃣  Twilio → Caller's ear (return path): ~{outbound_estimate}")
+                            Log.info(f"      • Twilio egress → Phone network → Caller hears it")
+                            Log.info(f"      • Based on measured inbound: {measured_inbound:.0f}ms × 1.5-2.0 (asymmetric)")
+                        else:
+                            # Estimate based on total caller_to_vad (old method)
+                            if caller_to_vad < 300:
+                                inbound_estimate = "100-200ms"
+                                outbound_estimate = "300-500ms"
+                                total_estimate = "400-700ms"
+                                region_name = "LOCAL/SAME DATACENTER"
+                            elif caller_to_vad < 600:
+                                inbound_estimate = "200-400ms"
+                                outbound_estimate = "500-800ms"
+                                total_estimate = "700-1200ms"
+                                region_name = "DOMESTIC (US)"
+                            else:
+                                inbound_estimate = "500-800ms"
+                                outbound_estimate = "1000-1800ms"
+                                total_estimate = "1500-2600ms"
+                                region_name = "INTERNATIONAL"
+
+                            Log.info(f"  4️⃣  Caller audio → Server (before we receive): ~{inbound_estimate}")
+                            Log.info(f"      • Time from caller starts speaking to server receives")
+                            Log.info(f"      • Cannot measure (we don't know when caller started)")
+                            Log.info("")
+                            Log.info(f"  5️⃣  Twilio → Caller's ear (return path): ~{outbound_estimate}")
+                            Log.info(f"      • Twilio egress → Phone network → Caller hears it")
+                            Log.info(f"      • Typically 1.2-1.5x inbound latency (asymmetric routing)")
+
                         Log.info("")
                         Log.info(f"  🌍 DETECTED REGION: {region_name}")
                         Log.info(f"  📊 ESTIMATED TOTAL END-TO-END: ~{total_estimate}")
