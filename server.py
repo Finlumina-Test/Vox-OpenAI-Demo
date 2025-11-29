@@ -1278,9 +1278,42 @@ async def handle_media_stream(websocket: WebSocket):
                     else:
                         if connection_manager.is_openai_connected():
                             try:
+                                import time
+                                # 🕐 TIMESTAMP: Received from Twilio
+                                t_received_from_twilio = time.time()
+
+                                # 🕐 TIMESTAMP: Before converting to OpenAI format
+                                t_before_convert = time.time()
+
                                 audio_message = audio_service.process_incoming_audio(data)
+
+                                # 🕐 TIMESTAMP: After converting, before sending to OpenAI
+                                t_after_convert = time.time()
+
                                 if audio_message:
                                     await connection_manager.send_to_openai(audio_message)
+
+                                    # 🕐 TIMESTAMP: After sending to OpenAI
+                                    t_after_send = time.time()
+
+                                    # Track first audio sent to OpenAI
+                                    if not hasattr(connection_manager.state, 'first_audio_to_openai_time'):
+                                        connection_manager.state.first_audio_to_openai_time = t_after_send
+                                        convert_time = (t_after_convert - t_before_convert) * 1000
+                                        send_time = (t_after_send - t_after_convert) * 1000
+                                        total_processing = (t_after_send - t_received_from_twilio) * 1000
+
+                                        # 📊 DETAILED REQUEST PATH BREAKDOWN
+                                        Log.info("=" * 70)
+                                        Log.info("📊 COMPLETE SERVER PROCESSING BREAKDOWN (Request Path):")
+                                        Log.info(f"  🎯 TOTAL: Receive from Twilio → Send to OpenAI: {total_processing:.2f}ms")
+                                        Log.info("")
+                                        Log.info(f"  Step 1️⃣  Convert Twilio → OpenAI format: {convert_time:.2f}ms")
+                                        Log.info(f"           (mulaw → PCM conversion)")
+                                        Log.info(f"  Step 2️⃣  Send to OpenAI: {send_time:.2f}ms")
+                                        Log.info(f"           (WebSocket transmission)")
+                                        Log.info("=" * 70)
+
                             except Exception as e:
                                 Log.error(f"[media] failed to send to OpenAI: {e}")
                         
@@ -1301,6 +1334,9 @@ async def handle_media_stream(websocket: WebSocket):
                 if openai_service.is_human_in_control():
                     return
 
+                # 🕐 TIMESTAMP: Received response from OpenAI
+                t_received_from_openai = time.time()
+
                 audio_data = openai_service.extract_audio_response_data(response) or {}
                 delta = audio_data.get("delta")
 
@@ -1309,15 +1345,30 @@ async def handle_media_stream(websocket: WebSocket):
 
                     if getattr(connection_manager.state, "stream_sid", None):
                         try:
+                            # 🕐 TIMESTAMP: Before converting OpenAI response to Twilio format
+                            t_before_convert_response = time.time()
+
                             audio_message = audio_service.process_outgoing_audio(
                                 response, connection_manager.state.stream_sid
                             )
+
+                            # 🕐 TIMESTAMP: After converting, before sending to Twilio
+                            t_after_convert_response = time.time()
+
                             if audio_message:
                                 await connection_manager.send_to_twilio(audio_message)
+
+                                # 🕐 TIMESTAMP: After sending to Twilio
+                                t_after_send_to_twilio = time.time()
 
                                 # 🔥 Track when FIRST audio is sent to Twilio
                                 if hasattr(connection_manager.state, 'speech_stopped_time') and not hasattr(connection_manager.state, 'first_audio_sent'):
                                     total_to_twilio = (time.time() - connection_manager.state.speech_stopped_time) * 1000
+
+                                    # Calculate detailed timestamps for the response path
+                                    receive_time = (t_received_from_openai - connection_manager.state.speech_stopped_time) * 1000
+                                    convert_response_time = (t_after_convert_response - t_before_convert_response) * 1000
+                                    send_to_twilio_time = (t_after_send_to_twilio - t_after_convert_response) * 1000
                                     # Calculate audio chunk size
                                     import base64
                                     try:
@@ -1325,9 +1376,26 @@ async def handle_media_stream(websocket: WebSocket):
                                         chunk_size = len(audio_bytes)
                                         # 8kHz mulaw: 8000 bytes/sec, so bytes/8 = milliseconds of audio
                                         audio_duration_ms = (chunk_size / 8000) * 1000
-                                        Log.info(f"📞 [LATENCY] First audio SENT TO TWILIO in {total_to_twilio:.0f}ms | Chunk: {chunk_size} bytes ({audio_duration_ms:.1f}ms of audio)")
-                                    except:
+
+                                        # 📊 DETAILED SERVER PROCESSING BREAKDOWN
+                                        Log.info("=" * 70)
+                                        Log.info("📊 COMPLETE SERVER PROCESSING BREAKDOWN (Response Path):")
+                                        Log.info(f"  🎯 TOTAL: Speech stopped → First audio sent to Twilio: {total_to_twilio:.2f}ms")
+                                        Log.info("")
+                                        Log.info(f"  Step 1️⃣  Received FIRST response from OpenAI: {receive_time:.2f}ms")
+                                        Log.info(f"           (VAD commit → OpenAI processes → Server receives)")
+                                        Log.info(f"  Step 2️⃣  Convert OpenAI → Twilio format: {convert_response_time:.2f}ms")
+                                        Log.info(f"           (PCM/G.711 conversion)")
+                                        Log.info(f"  Step 3️⃣  Send to Twilio: {send_to_twilio_time:.2f}ms")
+                                        Log.info(f"           (WebSocket transmission)")
+                                        Log.info("")
+                                        Log.info(f"  📦 Audio chunk: {chunk_size} bytes ({audio_duration_ms:.1f}ms of audio)")
+                                        Log.info("=" * 70)
+                                    except Exception as e:
                                         Log.info(f"📞 [LATENCY] First audio SENT TO TWILIO in {total_to_twilio:.0f}ms from speech stopped")
+                                        Log.info(f"  ⏱️  Received from OpenAI: {receive_time:.2f}ms")
+                                        Log.info(f"  ⏱️  Convert to Twilio: {convert_response_time:.2f}ms")
+                                        Log.info(f"  ⏱️  Send to Twilio: {send_to_twilio_time:.2f}ms")
                                     connection_manager.state.first_audio_sent = True
                                     connection_manager.state.first_audio_sent_ms = total_to_twilio  # Save for dashboard metrics
                                     connection_manager.state.audio_chunk_count = 1
