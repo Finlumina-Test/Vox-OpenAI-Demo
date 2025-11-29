@@ -1242,9 +1242,51 @@ async def handle_media_stream(websocket: WebSocket):
             import time
 
             # 🔥 TIMESTAMP: Track when we FIRST receive audio from Twilio
-            if data.get("event") == "media" and not hasattr(connection_manager.state, 'first_media_received_time'):
-                connection_manager.state.first_media_received_time = time.time()
-                Log.info(f"📥 [LATENCY] First audio RECEIVED from Twilio (caller started speaking)")
+            if data.get("event") == "media":
+                current_time = time.time()
+
+                if not hasattr(connection_manager.state, 'first_media_received_time'):
+                    connection_manager.state.first_media_received_time = current_time
+                    connection_manager.state.packet_count = 0
+                    connection_manager.state.packet_times = []
+                    Log.info(f"📥 [LATENCY] First audio RECEIVED from Twilio (caller started speaking)")
+
+                # Track packet arrival patterns for network jitter analysis
+                connection_manager.state.packet_count += 1
+                if hasattr(connection_manager.state, 'last_packet_time'):
+                    packet_interval = (current_time - connection_manager.state.last_packet_time) * 1000
+                    connection_manager.state.packet_times.append(packet_interval)
+
+                    # Log jitter stats every 50 packets
+                    if connection_manager.state.packet_count % 50 == 0:
+                        if len(connection_manager.state.packet_times) > 0:
+                            import statistics
+                            avg_interval = statistics.mean(connection_manager.state.packet_times[-50:])
+                            jitter = statistics.stdev(connection_manager.state.packet_times[-50:]) if len(connection_manager.state.packet_times[-50:]) > 1 else 0
+                            min_interval = min(connection_manager.state.packet_times[-50:])
+                            max_interval = max(connection_manager.state.packet_times[-50:])
+
+                            Log.info("=" * 70)
+                            Log.info(f"📡 NETWORK JITTER ANALYSIS (Last 50 packets):")
+                            Log.info(f"  📊 Packet count: {connection_manager.state.packet_count}")
+                            Log.info(f"  ⏱️  Average interval: {avg_interval:.2f}ms")
+                            Log.info(f"  📈 Jitter (std dev): {jitter:.2f}ms")
+                            Log.info(f"  ⬇️  Min interval: {min_interval:.2f}ms")
+                            Log.info(f"  ⬆️  Max interval: {max_interval:.2f}ms")
+
+                            # Determine network quality
+                            if jitter < 10:
+                                quality = "EXCELLENT (very stable)"
+                            elif jitter < 30:
+                                quality = "GOOD (stable)"
+                            elif jitter < 50:
+                                quality = "FAIR (some variation)"
+                            else:
+                                quality = "POOR (high jitter)"
+                            Log.info(f"  🎯 Network quality: {quality}")
+                            Log.info("=" * 70)
+
+                connection_manager.state.last_packet_time = current_time
 
             if data.get("event") == "media":
                 media = data.get("media") or {}
@@ -1399,12 +1441,47 @@ async def handle_media_stream(websocket: WebSocket):
                                     connection_manager.state.first_audio_sent = True
                                     connection_manager.state.first_audio_sent_ms = total_to_twilio  # Save for dashboard metrics
                                     connection_manager.state.audio_chunk_count = 1
+                                    connection_manager.state.outbound_chunk_times = []
+                                    connection_manager.state.last_outbound_chunk_time = time.time()
                                 elif hasattr(connection_manager.state, 'audio_chunk_count'):
                                     connection_manager.state.audio_chunk_count += 1
-                                    # Log every 10th chunk to see streaming pattern
-                                    if connection_manager.state.audio_chunk_count % 10 == 0:
+
+                                    # Track outbound streaming pattern
+                                    current_chunk_time = time.time()
+                                    if hasattr(connection_manager.state, 'last_outbound_chunk_time'):
+                                        chunk_interval = (current_chunk_time - connection_manager.state.last_outbound_chunk_time) * 1000
+                                        if not hasattr(connection_manager.state, 'outbound_chunk_times'):
+                                            connection_manager.state.outbound_chunk_times = []
+                                        connection_manager.state.outbound_chunk_times.append(chunk_interval)
+                                    connection_manager.state.last_outbound_chunk_time = current_chunk_time
+
+                                    # Log streaming stats every 20 chunks
+                                    if connection_manager.state.audio_chunk_count % 20 == 0:
                                         elapsed = (time.time() - connection_manager.state.speech_stopped_time) * 1000
-                                        Log.info(f"📊 [LATENCY] Sent {connection_manager.state.audio_chunk_count} chunks in {elapsed:.0f}ms")
+
+                                        if len(connection_manager.state.outbound_chunk_times) > 0:
+                                            import statistics
+                                            avg_interval = statistics.mean(connection_manager.state.outbound_chunk_times[-20:])
+                                            jitter = statistics.stdev(connection_manager.state.outbound_chunk_times[-20:]) if len(connection_manager.state.outbound_chunk_times[-20:]) > 1 else 0
+
+                                            Log.info("=" * 70)
+                                            Log.info(f"📤 OUTBOUND STREAMING ANALYSIS (Chunks {connection_manager.state.audio_chunk_count-19}-{connection_manager.state.audio_chunk_count}):")
+                                            Log.info(f"  ⏱️  Total elapsed: {elapsed:.0f}ms")
+                                            Log.info(f"  📊 Average chunk interval: {avg_interval:.2f}ms")
+                                            Log.info(f"  📈 Streaming jitter: {jitter:.2f}ms")
+
+                                            # Calculate expected vs actual streaming rate
+                                            # At 8kHz mulaw, typical chunk is 20ms of audio
+                                            if avg_interval < 25:
+                                                streaming_health = "EXCELLENT (smooth, real-time)"
+                                            elif avg_interval < 40:
+                                                streaming_health = "GOOD (minor buffering)"
+                                            else:
+                                                streaming_health = "SLOW (may cause delays)"
+                                            Log.info(f"  🎯 Streaming health: {streaming_health}")
+                                            Log.info("=" * 70)
+                                        else:
+                                            Log.info(f"📊 [LATENCY] Sent {connection_manager.state.audio_chunk_count} chunks in {elapsed:.0f}ms")
 
                                 mark_msg = audio_service.create_mark_message(
                                     connection_manager.state.stream_sid
@@ -1509,22 +1586,44 @@ async def handle_media_stream(websocket: WebSocket):
                     Log.info(f"⏱️ [LATENCY] VAD committed in {delay:.0f}ms after speech stopped")
                 else:
                     Log.info("⏱️ [LATENCY] VAD committed buffer - waiting for response...")
+
             elif event_type == 'response.created':
+                connection_manager.state.response_created_time = time.time()
                 if hasattr(connection_manager.state, 'vad_commit_time'):
                     delay = (time.time() - connection_manager.state.vad_commit_time) * 1000
-                    Log.info(f"⏱️ [LATENCY] Response created in {delay:.0f}ms after VAD commit")
+
+                    # This includes: network to OpenAI + OpenAI processing + network back
+                    Log.info("=" * 70)
+                    Log.info("🤖 OPENAI PROCESSING BREAKDOWN:")
+                    Log.info(f"  ⏱️  VAD commit → response.created: {delay:.2f}ms")
+                    Log.info(f"      (Network to OpenAI + AI processing + Network back)")
+
+                    # Estimate network vs processing (rough approximation)
+                    # Assuming ~50-100ms network round-trip, rest is processing
+                    estimated_network = 75  # ms (rough estimate for round-trip)
+                    estimated_processing = max(0, delay - estimated_network)
+                    Log.info(f"  📡 Estimated network latency: ~{estimated_network}ms (round-trip)")
+                    Log.info(f"  🧠 Estimated OpenAI processing: ~{estimated_processing:.0f}ms")
+                    Log.info("=" * 70)
+
             elif event_type == 'response.audio.delta':
-                if hasattr(connection_manager.state, 'vad_commit_time'):
-                    vad_delay = (time.time() - connection_manager.state.vad_commit_time) * 1000
-                    Log.info(f"🔥 [LATENCY] First audio delta in {vad_delay:.0f}ms after VAD commit")
+                # Track FIRST audio delta separately
+                if not hasattr(connection_manager.state, 'first_audio_delta_time'):
+                    connection_manager.state.first_audio_delta_time = time.time()
 
-                    # Calculate total end-to-end latency
-                    if hasattr(connection_manager.state, 'speech_stopped_time'):
-                        total_delay = (time.time() - connection_manager.state.speech_stopped_time) * 1000
-                        Log.info(f"✅ [LATENCY] END-TO-END: {total_delay:.0f}ms from speech stopped to first audio")
-                        delattr(connection_manager.state, 'speech_stopped_time')
+                    if hasattr(connection_manager.state, 'response_created_time'):
+                        streaming_delay = (time.time() - connection_manager.state.response_created_time) * 1000
+                        Log.info(f"🎵 [LATENCY] First audio delta: {streaming_delay:.2f}ms after response.created")
+                        Log.info(f"           (OpenAI streaming delay)")
 
-                    delattr(connection_manager.state, 'vad_commit_time')
+                    if hasattr(connection_manager.state, 'vad_commit_time'):
+                        vad_delay = (time.time() - connection_manager.state.vad_commit_time) * 1000
+                        Log.info(f"🔥 [LATENCY] Total VAD → First audio: {vad_delay:.2f}ms")
+
+                        # Calculate total end-to-end latency
+                        if hasattr(connection_manager.state, 'speech_stopped_time'):
+                            total_delay = (time.time() - connection_manager.state.speech_stopped_time) * 1000
+                            Log.info(f"✅ [LATENCY] END-TO-END: {total_delay:.0f}ms from speech stopped to first audio")
 
             if event_type == 'session.created':
                 Log.info("✅ [OpenAI] Session created successfully")
@@ -1676,20 +1775,63 @@ async def handle_media_stream(websocket: WebSocket):
                         total_from_first_audio = (time.time() - connection_manager.state.first_media_received_time) * 1000
                         caller_to_vad = total_from_first_audio - total_from_speech
 
-                        Log.info("=" * 60)
-                        Log.info("📊 COMPLETE LATENCY BREAKDOWN:")
-                        Log.info(f"  1️⃣  Caller starts → Server receives audio: ~{caller_to_vad:.0f}ms")
-                        Log.info(f"      (Caller phone → Twilio → Server)")
-                        Log.info(f"  2️⃣  Server processing (VAD → First audio sent): {ai_processing_ms:.0f}ms")
-                        Log.info(f"      (Your server + OpenAI processing)")
-                        Log.info(f"  3️⃣  Twilio confirms playback started: {mark_roundtrip:.0f}ms")
-                        Log.info(f"      (Twilio jitter buffer)")
-                        Log.info(f"  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-                        Log.info(f"  🎯 TOTAL (from first audio to playback): {total_from_first_audio:.0f}ms")
-                        Log.info(f"  ⚠️  ESTIMATE: Add ~300-500ms for caller audio to reach server")
-                        Log.info(f"  ⚠️  ESTIMATE: Add ~500-1500ms for audio to reach caller's ear")
-                        Log.info(f"      (Varies HEAVILY by region: ~500ms US, ~1500ms international)")
-                        Log.info("=" * 60)
+                        Log.info("=" * 80)
+                        Log.info("📊 COMPLETE END-TO-END LATENCY BREAKDOWN:")
+                        Log.info("")
+                        Log.info("🔵 MEASURED COMPONENTS (from logs):")
+                        Log.info(f"  1️⃣  Caller → Server (inbound network): ~{caller_to_vad:.0f}ms")
+                        Log.info(f"      • Caller phone → Twilio ingress → Server WebSocket")
+                        Log.info(f"      • Includes: Phone network + Twilio routing + Internet")
+                        Log.info("")
+                        Log.info(f"  2️⃣  Server processing: {ai_processing_ms:.0f}ms")
+                        Log.info(f"      • Breakdown available in 'Server Processing Breakdown' logs above")
+                        Log.info(f"      • Includes: Format conversion + OpenAI network + AI processing")
+                        Log.info("")
+                        Log.info(f"  3️⃣  Twilio jitter buffer & egress: {mark_roundtrip:.0f}ms")
+                        Log.info(f"      • Server → Twilio WebSocket → Jitter buffer → Playback starts")
+
+                        # Break down the mark roundtrip
+                        estimated_websocket_latency = min(50, mark_roundtrip * 0.2)  # ~20% or max 50ms
+                        estimated_jitter_buffer = mark_roundtrip - estimated_websocket_latency
+
+                        Log.info(f"      • Estimated WebSocket latency: ~{estimated_websocket_latency:.0f}ms")
+                        Log.info(f"      • Estimated Twilio jitter buffer: ~{estimated_jitter_buffer:.0f}ms")
+                        Log.info(f"        (Jitter buffer smooths audio, required for quality)")
+                        Log.info("")
+                        Log.info(f"  🎯 TOTAL MEASURED: {total_from_first_audio:.0f}ms")
+                        Log.info(f"      (From first audio received to Twilio playback confirmation)")
+                        Log.info("")
+                        Log.info("🟡 ESTIMATED COMPONENTS (cannot measure directly):")
+
+                        # Estimate based on region
+                        if caller_to_vad < 300:
+                            inbound_estimate = "100-200ms"
+                            outbound_estimate = "300-500ms"
+                            total_estimate = "400-700ms"
+                            region_name = "LOCAL/SAME DATACENTER"
+                        elif caller_to_vad < 600:
+                            inbound_estimate = "200-400ms"
+                            outbound_estimate = "500-800ms"
+                            total_estimate = "700-1200ms"
+                            region_name = "DOMESTIC (US)"
+                        else:
+                            inbound_estimate = "500-800ms"
+                            outbound_estimate = "1000-1800ms"
+                            total_estimate = "1500-2600ms"
+                            region_name = "INTERNATIONAL"
+
+                        Log.info(f"  4️⃣  Caller audio → Server (before we receive): ~{inbound_estimate}")
+                        Log.info(f"      • Time from caller starts speaking to server receives")
+                        Log.info(f"      • Cannot measure (we don't know when caller started)")
+                        Log.info("")
+                        Log.info(f"  5️⃣  Twilio → Caller's ear (return path): ~{outbound_estimate}")
+                        Log.info(f"      • Twilio egress → Phone network → Caller hears it")
+                        Log.info(f"      • Typically 1.2-1.5x inbound latency (asymmetric routing)")
+                        Log.info("")
+                        Log.info(f"  🌍 DETECTED REGION: {region_name}")
+                        Log.info(f"  📊 ESTIMATED TOTAL END-TO-END: ~{total_estimate}")
+                        Log.info(f"      (What the caller actually experiences)")
+                        Log.info("=" * 80)
 
                     connection_manager.state.first_mark_received = True
 
