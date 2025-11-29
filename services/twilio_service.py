@@ -23,7 +23,9 @@ class TwilioService:
             num_digits=1,
             timeout=60,
             action=f"{backend_url}/demo-start",
-            method="POST"
+            method="POST",
+            input="dtmf",  # 🔥 Only listen for keypad (faster interrupt)
+            finish_on_key=""  # 🔥 ANY key finishes immediately
         )
         
         # Welcome - NO PAUSE (faster)
@@ -84,16 +86,18 @@ class TwilioService:
         return str(response)
     
     @staticmethod
-    def create_demo_start_twiml(backend_host: str, skipped: bool = False) -> str:
+    def create_demo_start_twiml(backend_host: str, skipped: bool = False, call_sid: str = None) -> str:
         """
         TwiML to start OpenAI media stream after key press.
         🔥 Different message if user skipped the intro
+        🎙️ Recording will be started via REST API (not <Record> verb to avoid blocking)
         """
         response = VoiceResponse()
-        
+
         if skipped:
+            # 🔥 Ultra short message for instant connect
             response.say(
-                "Skipping to demo. Connecting you now.",
+                "Connecting now.",
                 voice=TwilioService.TWILIO_VOICE
             )
         else:
@@ -101,12 +105,12 @@ class TwilioService:
                 "Great! Starting your demo now. You have one minute.",
                 voice=TwilioService.TWILIO_VOICE
             )
-        
+
         # Connect to media stream
         connect = Connect()
         connect.stream(url=f'wss://{backend_host}/media-stream')
         response.append(connect)
-        
+
         return str(response)
     
     @staticmethod
