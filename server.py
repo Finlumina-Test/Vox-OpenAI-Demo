@@ -240,17 +240,36 @@ async def handle_incoming_call(request: Request):
         
         # 🔥 Set status callback to track hangups
         status_callback_url = f"{backend_url}/call-status"
-        
-        # Get intro TwiML
+
+        # 🎬 AD MODE: Skip intro, connect instantly
+        if Config.AD_MODE:
+            Log.info("🎬 AD MODE: Skipping intro, connecting directly to OpenAI")
+            response = TwilioVoiceResponse()
+
+            # Instant connection - no intro
+            from twilio.twiml.voice_response import Connect, Stream
+            connect = Connect()
+            connect.stream(url=f'wss://{request.url.hostname}/media-stream')
+            response.append(connect)
+
+            # Add status callback
+            twiml_str = str(response)
+            twiml_str = twiml_str.replace(
+                '<Response>',
+                f'<Response statusCallback="{status_callback_url}" statusCallbackMethod="POST" statusCallbackEvent="completed failed">'
+            )
+            return Response(content=twiml_str, media_type="application/xml")
+
+        # Normal mode: Get intro TwiML
         intro_twiml_str = TwilioService.create_demo_intro_twiml(session_id, backend_url)
-        
+
         # Parse and merge TwiML with status callback
         # We need to add statusCallback to the root Response element
         intro_twiml_str = intro_twiml_str.replace(
             '<Response>',
             f'<Response statusCallback="{status_callback_url}" statusCallbackMethod="POST" statusCallbackEvent="completed failed">'
         )
-        
+
         return Response(content=intro_twiml_str, media_type="application/xml")
         
     except Exception as e:
@@ -1748,8 +1767,11 @@ async def handle_media_stream(websocket: WebSocket):
                 Log.info(f"📋 Available demo sessions: {list(demo_sessions.keys())}")
                 Log.info(f"📋 Call SID searching for: {current_call_sid}")
             
-            if demo_session_id and demo_start_time:
+            # 🎬 AD MODE: Skip timer
+            if demo_session_id and demo_start_time and not Config.AD_MODE:
                 asyncio.create_task(check_demo_timer())
+            elif Config.AD_MODE:
+                Log.info("🎬 AD MODE: No time limit - call can run indefinitely")
             
             caller_silence_detector.reset()
             ai_silence_detector.reset()

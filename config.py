@@ -42,6 +42,9 @@ class Config:
     # Demo Configuration
     DEMO_DURATION_SECONDS: int = int(os.getenv('DEMO_DURATION_SECONDS', '60'))
 
+    # 🎬 AD MODE - For shooting ads/videos (no intro, no time limit)
+    AD_MODE: bool = os.getenv('AD_MODE', 'false').lower() == 'true'
+
     # Latency Testing Configuration
     ENABLE_LATENCY_CALIBRATION: bool = os.getenv('ENABLE_LATENCY_CALIBRATION', 'false').lower() == 'true'
 
