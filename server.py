@@ -1272,6 +1272,44 @@ async def handle_media_stream(websocket: WebSocket):
                     else:
                         Log.info(f"📥 [LATENCY] First audio RECEIVED from Twilio (caller started speaking)")
 
+                    # 🧪 Run latency calibration test if enabled (after first audio confirms path works)
+                    if Config.ENABLE_LATENCY_CALIBRATION and not hasattr(connection_manager.state, 'latency_calibration_done'):
+                        connection_manager.state.latency_calibration_done = True
+                        connection_manager.state.latency_calibration_running = True
+                        Log.info("=" * 70)
+                        Log.info("🧪 LATENCY CALIBRATION TEST STARTING...")
+                        Log.info("   AI will ask you to say 'ready' when you hear a beep")
+                        Log.info("=" * 70)
+
+                        # Send a calibration message via OpenAI
+                        try:
+                            # Clear any existing audio buffer first
+                            await connection_manager.send_to_openai({
+                                "type": "input_audio_buffer.clear"
+                            })
+
+                            calibration_message = {
+                                "type": "conversation.item.create",
+                                "item": {
+                                    "type": "message",
+                                    "role": "user",
+                                    "content": [
+                                        {
+                                            "type": "input_text",
+                                            "text": "Say exactly: 'Please say the word ready when you hear the beep. BEEP!'"
+                                        }
+                                    ]
+                                }
+                            }
+                            await connection_manager.send_to_openai(calibration_message)
+                            await connection_manager.send_to_openai({"type": "response.create"})
+
+                            # Track when we send the calibration beep
+                            connection_manager.state.calibration_beep_sent_time = time.time()
+                            Log.info("🔔 [CALIBRATION] Instruction sent to AI - waiting for caller to say 'ready'...")
+                        except Exception as e:
+                            Log.error(f"[CALIBRATION] Failed to send test: {e}")
+
                 # Track packet arrival patterns for network jitter analysis
                 connection_manager.state.packet_count += 1
                 if hasattr(connection_manager.state, 'last_packet_time'):
@@ -1673,39 +1711,6 @@ async def handle_media_stream(websocket: WebSocket):
                 Log.info("✅ [OpenAI] Session created successfully")
             elif event_type == 'session.updated':
                 Log.info("✅ [OpenAI] Session updated successfully")
-
-                # 🧪 Run latency calibration test if enabled
-                if Config.ENABLE_LATENCY_CALIBRATION and not hasattr(connection_manager.state, 'latency_calibration_done'):
-                    connection_manager.state.latency_calibration_done = True
-                    connection_manager.state.latency_calibration_running = True
-                    Log.info("=" * 70)
-                    Log.info("🧪 LATENCY CALIBRATION TEST STARTING...")
-                    Log.info("   Waiting for caller to speak after beep")
-                    Log.info("=" * 70)
-
-                    # Send a calibration message via OpenAI
-                    try:
-                        calibration_message = {
-                            "type": "conversation.item.create",
-                            "item": {
-                                "type": "message",
-                                "role": "user",
-                                "content": [
-                                    {
-                                        "type": "input_text",
-                                        "text": "Say: 'I will play a beep sound. When you hear it, please say ready.'"
-                                    }
-                                ]
-                            }
-                        }
-                        await connection_manager.send_to_openai(calibration_message)
-                        await connection_manager.send_to_openai({"type": "response.create"})
-
-                        # Track when we send the calibration beep
-                        connection_manager.state.calibration_beep_sent_time = time.time()
-                        Log.info("🔔 [CALIBRATION] Beep instruction sent - waiting for caller response...")
-                    except Exception as e:
-                        Log.error(f"[CALIBRATION] Failed to send test: {e}")
             elif event_type == 'response.audio_transcript.delta':
                 Log.debug(f"[OpenAI] 📝 AI transcript delta received")
             elif event_type == 'response.audio_transcript.done':
@@ -1715,7 +1720,12 @@ async def handle_media_stream(websocket: WebSocket):
             elif event_type == 'response.done':
                 Log.debug(f"[OpenAI] ✅ Response complete")
             elif event_type == 'error':
-                Log.error(f"[OpenAI] ❌ Error event: {response}")
+                # Suppress harmless "no active response" errors from cancel attempts
+                error_code = response.get('error', {}).get('code')
+                if error_code == 'response_cancel_not_active':
+                    Log.debug(f"[OpenAI] Response cancel attempted but no active response (harmless)")
+                else:
+                    Log.error(f"[OpenAI] ❌ Error event: {response}")
 
             openai_service.process_event_for_logging(response)
             await openai_service.extract_caller_transcript(response)
