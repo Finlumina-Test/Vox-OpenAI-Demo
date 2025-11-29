@@ -1180,7 +1180,8 @@ async def handle_media_stream(websocket: WebSocket):
 
                 ai_currently_speaking = True
 
-                if current_call_sid:
+                # 🔇 VAD: Filter silent chunks for dashboard (keeps call audio untouched)
+                if current_call_sid and ai_silence_detector.should_transmit(audio_b64, "AI"):
                     broadcast_to_dashboards_nonblocking({
                         "messageType": "audio",
                         "speaker": "AI",
@@ -1327,7 +1328,8 @@ async def handle_media_stream(websocket: WebSocket):
                                 except Exception as e:
                                     Log.error(f"[media] Failed to send to human: {e}")
                         
-                        if should_send_to_dashboard:
+                        # 🔇 VAD: Filter silent chunks for dashboard (keeps call audio untouched)
+                        if should_send_to_dashboard and caller_silence_detector.should_transmit(payload_b64, "Caller"):
                             broadcast_to_dashboards_nonblocking({
                                 "messageType": "audio",
                                 "speaker": "Caller",
@@ -1379,7 +1381,8 @@ async def handle_media_stream(websocket: WebSocket):
                             except Exception as e:
                                 Log.error(f"[media] failed to send to OpenAI: {e}")
                         
-                        if should_send_to_dashboard:
+                        # 🔇 VAD: Filter silent chunks for dashboard (keeps call audio untouched)
+                        if should_send_to_dashboard and caller_silence_detector.should_transmit(payload_b64, "Caller"):
                             broadcast_to_dashboards_nonblocking({
                                 "messageType": "audio",
                                 "speaker": "Caller",
