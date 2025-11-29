@@ -1627,7 +1627,7 @@ async def handle_media_stream(websocket: WebSocket):
 
                     # 📊 Broadcast latency metrics to dashboard
                     try:
-                        # Determine performance rating
+                        # Determine performance rating based on server processing
                         if ai_processing_ms < 500:
                             performance_rating = "excellent"
                         elif ai_processing_ms < 800:
@@ -1635,10 +1635,24 @@ async def handle_media_stream(websocket: WebSocket):
                         else:
                             performance_rating = "fair"
 
-                        # Determine region based on network delay
-                        if network_delay_ms < 500:
+                        # Calculate additional metrics if we have first_media_received_time
+                        caller_to_server_ms = 0
+                        total_measured_ms = round(total_from_speech)
+                        estimated_return_path_ms = 0
+
+                        if hasattr(connection_manager.state, 'first_media_received_time'):
+                            total_from_first_audio = (time.time() - connection_manager.state.first_media_received_time) * 1000
+                            caller_to_server_ms = round(total_from_first_audio - total_from_speech)
+                            total_measured_ms = round(total_from_first_audio)
+
+                            # Estimate return path based on caller_to_server (rough approximation)
+                            # International calls typically have symmetric latency
+                            estimated_return_path_ms = round(caller_to_server_ms * 1.2)  # Add 20% for asymmetry
+
+                        # Determine region based on caller_to_server latency
+                        if caller_to_server_ms < 300:
                             region = "local"
-                        elif network_delay_ms < 1000:
+                        elif caller_to_server_ms < 600:
                             region = "domestic"
                         else:
                             region = "international"
@@ -1648,10 +1662,25 @@ async def handle_media_stream(websocket: WebSocket):
                             "callSid": current_call_sid,
                             "timestamp": int(time.time() * 1000),
                             "metrics": {
-                                "aiProcessingMs": round(ai_processing_ms),
-                                "networkDelayMs": round(network_delay_ms),
-                                "totalLatencyMs": round(total_from_speech),
-                                "markRoundtripMs": round(mark_roundtrip),
+                                # What we control
+                                "serverProcessingMs": round(ai_processing_ms),  # Server + OpenAI + network between them
+
+                                # What Twilio controls
+                                "twilioBufferMs": round(mark_roundtrip),  # Jitter buffer
+
+                                # What nobody controls (telecom infrastructure)
+                                "inboundNetworkMs": caller_to_server_ms,  # Caller → Server (measured)
+                                "estimatedOutboundNetworkMs": estimated_return_path_ms,  # Server → Caller (estimated)
+
+                                # Totals
+                                "totalMeasuredMs": total_measured_ms,  # Everything we can measure
+                                "estimatedTotalMs": total_measured_ms + estimated_return_path_ms,  # Full end-to-end estimate
+
+                                # Legacy fields (for backward compatibility)
+                                "aiProcessingMs": round(ai_processing_ms),  # Deprecated: Use serverProcessingMs
+                                "networkDelayMs": round(network_delay_ms),  # Deprecated: Use twilioBufferMs
+
+                                # Metadata
                                 "performanceRating": performance_rating,
                                 "region": region
                             }
