@@ -30,12 +30,27 @@ class Config:
     RESEND_API_KEY: str | None = os.getenv('RESEND_API_KEY')
     FEEDBACK_EMAIL: str = os.getenv('FEEDBACK_EMAIL', 'faizan@finlumina.com')
 
+    # Supabase Configuration
+    SUPABASE_URL: str | None = os.getenv('SUPABASE_URL')
+    SUPABASE_KEY: str | None = os.getenv('SUPABASE_KEY')
+    SUPABASE_TABLE: str = os.getenv('SUPABASE_TABLE', 'calls')  # Main calls table
+    SUPABASE_BUCKET: str = os.getenv('SUPABASE_BUCKET', 'call-recordings')  # Storage bucket
+
+    # Frontend Configuration
+    FRONTEND_URL: str | None = os.getenv('FRONTEND_URL')  # Frontend URL for audio upload notifications
+
     # Demo Configuration
     DEMO_DURATION_SECONDS: int = int(os.getenv('DEMO_DURATION_SECONDS', '60'))
 
+    # 🎬 AD MODE - For shooting ads/videos (no intro, no time limit)
+    AD_MODE: bool = os.getenv('AD_MODE', 'false').lower() == 'true'
+
+    # Latency Testing Configuration
+    ENABLE_LATENCY_CALIBRATION: bool = os.getenv('ENABLE_LATENCY_CALIBRATION', 'false').lower() == 'true'
+
     # AI Assistant Configuration
     SYSTEM_MESSAGE: str = (
-        "You are Vox (pronounced like 'vocks' - NOT spelled out as V-O-X) - Finlumina's advanced multilingual voice assistant. "
+        "You are Vox (pronounced like 'vocks', rhymes with 'box' - NOT spelled out as V-O-X) - Finlumina's advanced multilingual voice assistant. "
         "This is a live demo showcasing real-time AI conversation capabilities.\n\n"
 
         "🔥 CRITICAL BOUNDARIES & RESPECT:\n"
@@ -58,7 +73,7 @@ class Config:
 
         "VOX PRODUCT DETAILS:\n"
         "- Vox (say it like 'vocks', rhymes with 'box') is Finlumina's flagship AI voice assistant platform\n"
-        "- Built on OpenAI's Realtime API for ultra-low latency (<500ms response)\n"
+        "- Built on OpenAI's Realtime API for ultra-fast AI processing (<500ms average)\n"
         "- Powered by GPT-4 level intelligence for natural conversations\n"
         "- Multilingual: English, Spanish, French, German, Italian, Portuguese, Arabic, Hindi, Urdu, Punjabi, Chinese, Japanese, Korean, and more\n"
         "- Real-time voice streaming with natural interruption handling\n"
@@ -77,7 +92,7 @@ class Config:
         "- Real Estate: Property inquiries, showing scheduling, virtual tours\n\n"
 
         "TECHNICAL CAPABILITIES:\n"
-        "- Sub-500ms response time (faster than human agents)\n"
+        "- Sub-500ms AI processing time (faster than human reaction time)\n"
         "- Natural voice with emotional intelligence\n"
         "- Context-aware conversations with memory\n"
         "- Integration with CRMs, databases, and business systems\n"
@@ -128,7 +143,8 @@ class Config:
         "- 'Who built this?' → 'Vox was built by Faizan Ahmad, the founder of Finlumina, an AI innovation company.'\n"
         "- 'How much does it cost?' → 'Vox has custom enterprise pricing based on your needs. Contact hello@mail.vox.finlumina.com for a quote!'\n"
         "- 'What languages?' → 'Vox supports 15+ languages including English, Spanish, Arabic, Urdu, Punjabi, Hindi, Chinese, and more!'\n"
-        "- 'How fast is it?' → 'Vox responds in under 500 milliseconds - faster than most human agents!'\n"
+        "- 'How fast is it?' → 'Vox processes and responds in under 500 milliseconds - faster than human reaction time! The total time you experience depends on your phone network, but most North American callers experience about one second total.'\n"
+        "- 'Why does it sometimes feel slower?' → 'Our AI processes everything in under 500ms. What you experience also includes phone network delays, which vary by location - typically under a second for North America, but can be higher for international calls due to network routing.'\n"
         "- 'Can it integrate with my systems?' → 'Yes! Vox integrates with CRMs, databases, and most business systems via API.'\n\n"
 
         "PRONUNCIATION GUIDE:\n"
@@ -201,6 +217,10 @@ class Config:
     @classmethod
     def has_email_configured(cls) -> bool:
         return bool(cls.RESEND_API_KEY)
+
+    @classmethod
+    def has_supabase_configured(cls) -> bool:
+        return bool(cls.SUPABASE_URL and cls.SUPABASE_KEY)
 
 
 # Initialize and validate

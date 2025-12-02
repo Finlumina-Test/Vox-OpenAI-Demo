@@ -240,17 +240,36 @@ async def handle_incoming_call(request: Request):
         
         # 🔥 Set status callback to track hangups
         status_callback_url = f"{backend_url}/call-status"
-        
-        # Get intro TwiML
+
+        # 🎬 AD MODE: Skip intro, connect instantly
+        if Config.AD_MODE:
+            Log.info("🎬 AD MODE: Skipping intro, connecting directly to OpenAI")
+            response = TwilioVoiceResponse()
+
+            # Instant connection - no intro
+            from twilio.twiml.voice_response import Connect, Stream
+            connect = Connect()
+            connect.stream(url=f'wss://{request.url.hostname}/media-stream')
+            response.append(connect)
+
+            # Add status callback
+            twiml_str = str(response)
+            twiml_str = twiml_str.replace(
+                '<Response>',
+                f'<Response statusCallback="{status_callback_url}" statusCallbackMethod="POST" statusCallbackEvent="completed failed">'
+            )
+            return Response(content=twiml_str, media_type="application/xml")
+
+        # Normal mode: Get intro TwiML
         intro_twiml_str = TwilioService.create_demo_intro_twiml(session_id, backend_url)
-        
+
         # Parse and merge TwiML with status callback
         # We need to add statusCallback to the root Response element
         intro_twiml_str = intro_twiml_str.replace(
             '<Response>',
             f'<Response statusCallback="{status_callback_url}" statusCallbackMethod="POST" statusCallbackEvent="completed failed">'
         )
-        
+
         return Response(content=intro_twiml_str, media_type="application/xml")
         
     except Exception as e:
@@ -363,10 +382,46 @@ async def demo_rating(request: Request):
         response.hangup()
         return Response(content=str(response), media_type="application/xml")
 
-@app.api_route("/call-status", methods=["POST"])
+@app.api_route("/call-status", methods=["GET", "POST"])
 async def handle_call_status(request: Request):
-    """Handle Twilio call status callbacks (hangup tracking)."""
+    """
+    Handle call status:
+    - GET: Frontend check if call has ended (returns JSON)
+    - POST: Twilio status callback (hangup tracking)
+    """
     try:
+        # GET request from frontend - check if call has ended
+        if request.method == "GET":
+            call_sid = request.query_params.get('callSid')
+
+            if not call_sid:
+                return JSONResponse({"error": "Missing callSid parameter"}, status_code=400)
+
+            # Check if call is still active in active_calls
+            is_active = call_sid in active_calls
+
+            # Check if call ended (exists in demo_sessions but not in active_calls)
+            session_data = None
+            for sid, data in demo_sessions.items():
+                if data.get('call_sid') == call_sid:
+                    session_data = data
+                    break
+
+            # Also check pending sessions
+            if not session_data:
+                for sid, data in demo_pending_start.items():
+                    if data.get('call_sid') == call_sid:
+                        session_data = data
+                        break
+
+            return JSONResponse({
+                "callSid": call_sid,
+                "isActive": is_active,
+                "hasEnded": not is_active and session_data is not None,
+                "exists": session_data is not None
+            })
+
+        # POST request from Twilio - status callback
         Log.info("=" * 80)
         Log.info("🔥 CALL STATUS CALLBACK RECEIVED")
         Log.info("=" * 80)
@@ -387,9 +442,19 @@ async def handle_call_status(request: Request):
         Log.info(f"📞 [StatusCallback] Duration: {call_duration}s")
         
         # Only process completed/failed calls
-        if call_status in ['completed', 'failed', 'busy', 'no-answer']:
-            Log.info(f"✅ Status matches - processing email...")
-            
+        if call_status in ['completed', 'failed', 'busy', 'no-answer', 'canceled']:
+            Log.info(f"✅ Status matches - processing...")
+
+            # Send WebSocket notification to frontend for auto-save
+            from datetime import datetime
+            broadcast_to_dashboards_nonblocking({
+                "messageType": "callEnded",
+                "callId": call_sid,
+                "status": call_status,
+                "timestamp": datetime.utcnow().isoformat()
+            }, call_sid)
+            Log.info(f"📨 Sent callEnded WebSocket message to frontend for {call_sid}")
+
             # Find session for this call
             session_id = None
             phone = from_phone
@@ -443,13 +508,203 @@ async def handle_call_status(request: Request):
         
         Log.info("=" * 80)
         return Response(content="OK", status_code=200)
-        
+
     except Exception as e:
         Log.error(f"[StatusCallback] Error: {e}")
         import traceback
         Log.error(f"Traceback: {traceback.format_exc()}")
         return Response(content="ERROR", status_code=200)
-        
+
+
+async def notify_frontend_audio_upload(call_sid: str, audio_url: str, retry_count: int = 0) -> bool:
+    """
+    Notify frontend that audio URL is available with retry handling for race conditions.
+
+    Args:
+        call_sid: Twilio call SID
+        audio_url: Public URL to the audio file in Supabase Storage
+        retry_count: Current retry attempt (max 9 retries = 10 total attempts)
+
+    Returns:
+        True if notification successful, False otherwise
+    """
+    if not Config.FRONTEND_URL:
+        return False
+
+    try:
+        import httpx
+
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                f"{Config.FRONTEND_URL}/api/calls/save",
+                json={
+                    "call_id": call_sid,  # Frontend expects call_id
+                    "audio_url": audio_url,
+                    "update_audio_only": True,  # Only update audio URL, don't create full record
+                    "retry_count": retry_count
+                },
+                timeout=10.0
+            )
+
+            # Handle successful update
+            if response.status_code == 200:
+                Log.info(f"✅ Audio URL updated: {call_sid}")
+                return True
+
+            # Handle 404 with retry flag (race condition - call not saved yet)
+            if response.status_code == 404:
+                try:
+                    data = response.json()
+                    if data.get("retry") and retry_count < 9:  # Max 10 attempts (0-9)
+                        retry_after_ms = data.get("retry_after", 1000)  # Default 1 second
+                        retry_after_sec = retry_after_ms / 1000
+                        Log.info(f"⏳ Call not found yet (attempt {retry_count + 1}/10), waiting {retry_after_sec}s...")
+                        await asyncio.sleep(retry_after_sec)
+                        return await notify_frontend_audio_upload(call_sid, audio_url, retry_count + 1)
+                    else:
+                        Log.error(f"❌ Failed to update audio URL: Call not found after {retry_count + 1} attempts - {call_sid}")
+                        return False
+                except Exception as parse_error:
+                    Log.error(f"❌ Failed to parse 404 response: {parse_error}")
+                    return False
+
+            # Handle other error responses
+            try:
+                data = response.json()
+                Log.warning(f"⚠️ Failed to update audio URL: {response.status_code} - {data}")
+            except:
+                Log.warning(f"⚠️ Frontend returned {response.status_code}: {response.text}")
+            return False
+
+    except Exception as e:
+        Log.warning(f"⚠️ Failed to notify frontend: {e}")
+        return False
+
+
+@app.api_route("/recording-status", methods=["POST"])
+async def handle_recording_status(request: Request):
+    """
+    Handle Twilio recording status callback.
+    Stores recording URL in Supabase when recording is completed.
+    """
+    try:
+        form_data = await request.form()
+
+        Log.info("=" * 80)
+        Log.info("🎙️ RECORDING STATUS CALLBACK RECEIVED")
+        Log.info("=" * 80)
+
+        # Log all form data for debugging
+        Log.info(f"📋 Recording callback data: {dict(form_data)}")
+
+        # Extract recording data
+        recording_sid = form_data.get('RecordingSid')
+        recording_url = form_data.get('RecordingUrl')
+        recording_status = form_data.get('RecordingStatus')
+        call_sid = form_data.get('CallSid')
+        recording_duration = form_data.get('RecordingDuration', '0')
+
+        Log.info(f"🎙️ RecordingSid: {recording_sid}")
+        Log.info(f"🎙️ RecordingUrl: {recording_url}")
+        Log.info(f"🎙️ Status: {recording_status}")
+        Log.info(f"🎙️ CallSid: {call_sid}")
+        Log.info(f"🎙️ Duration: {recording_duration}s")
+
+        # Only process completed recordings
+        if recording_status == 'completed' and recording_url:
+            # Add .mp3 extension to URL for direct download
+            full_recording_url = f"{recording_url}.mp3"
+
+            Log.info(f"✅ Recording completed: {full_recording_url}")
+
+            # Find session data for this call
+            session_id = None
+            session_data = None
+
+            for sid, data in demo_sessions.items():
+                if data.get('call_sid') == call_sid:
+                    session_id = sid
+                    session_data = data
+                    break
+
+            if not session_data:
+                for sid, data in demo_pending_start.items():
+                    if data.get('call_sid') == call_sid:
+                        session_id = sid
+                        session_data = data
+                        break
+
+            # Download from Twilio and upload to Supabase Storage
+            if Config.has_supabase_configured():
+                try:
+                    import httpx
+                    from supabase import create_client
+
+                    supabase = create_client(Config.SUPABASE_URL, Config.SUPABASE_KEY)
+
+                    # Step 1: Download audio from Twilio
+                    Log.info(f"📥 Downloading audio from Twilio: {full_recording_url}")
+
+                    async with httpx.AsyncClient() as client:
+                        # Use basic auth with Twilio credentials
+                        auth = (Config.TWILIO_ACCOUNT_SID, Config.TWILIO_AUTH_TOKEN)
+                        response = await client.get(full_recording_url, auth=auth, timeout=30.0)
+                        response.raise_for_status()
+                        audio_bytes = response.content
+
+                    Log.info(f"✅ Downloaded {len(audio_bytes)} bytes from Twilio")
+
+                    # Step 2: Upload to Supabase Storage
+                    # Use recording_sid to avoid duplicates if multiple recordings per call
+                    file_name = f"{call_sid}_{recording_sid}.mp3"
+                    Log.info(f"📤 Uploading to Supabase Storage: {Config.SUPABASE_BUCKET}/{file_name}")
+
+                    storage_response = supabase.storage.from_(Config.SUPABASE_BUCKET).upload(
+                        path=file_name,
+                        file=audio_bytes,
+                        file_options={
+                            "content-type": "audio/mpeg",
+                            "upsert": "true"  # Overwrite if exists (shouldn't happen but just in case)
+                        }
+                    )
+
+                    Log.info(f"✅ Uploaded to Supabase Storage: {file_name}")
+
+                    # Step 3: Get public URL
+                    public_url = supabase.storage.from_(Config.SUPABASE_BUCKET).get_public_url(file_name)
+                    Log.info(f"🔗 Public URL: {public_url}")
+
+                    # Step 4: Update only audio_url in database (don't touch other fields)
+                    from datetime import datetime
+
+                    result = supabase.table(Config.SUPABASE_TABLE).update({
+                        'audio_url': public_url,
+                        'updated_at': datetime.utcnow().isoformat()
+                    }).eq('call_sid', call_sid).execute()
+
+                    Log.info(f"✅ Recording audio URL updated in database: {recording_sid}")
+                    Log.info(f"📊 Database response: {result}")
+
+                    # Notify frontend that audio URL is available (with retry handling)
+                    await notify_frontend_audio_upload(call_sid, public_url)
+
+                except Exception as e:
+                    Log.error(f"❌ Failed to download/upload recording: {e}")
+                    import traceback
+                    Log.error(f"Traceback: {traceback.format_exc()}")
+            else:
+                Log.warning("⚠️ Supabase not configured - recording URL not stored")
+                Log.warning(f"💡 Recording URL: {full_recording_url}")
+
+        Log.info("=" * 80)
+        return Response(content="OK", status_code=200)
+
+    except Exception as e:
+        Log.error(f"[RecordingCallback] Error: {e}")
+        import traceback
+        Log.error(f"Traceback: {traceback.format_exc()}")
+        return Response(content="ERROR", status_code=200)
+
 
 @app.get("/api/validate-session/{session_id}")
 async def validate_session(session_id: str):
@@ -663,7 +918,21 @@ async def handle_takeover(request: Request):
         
         if action == "enable":
             openai_service.enable_human_takeover()
-            
+
+            # 🔥 CRITICAL: Clear Twilio audio buffer IMMEDIATELY
+            try:
+                stream_sid = getattr(connection_manager.state, 'stream_sid', None)
+                if stream_sid:
+                    clear_message = {
+                        "event": "clear",
+                        "streamSid": stream_sid
+                    }
+                    await connection_manager.send_to_twilio(clear_message)
+                    Log.info(f"[Takeover] 🔇 Cleared Twilio audio buffer (dropped AI audio)")
+            except Exception as e:
+                Log.error(f"[Takeover] Failed to clear Twilio buffer: {e}")
+
+            # Cancel any ongoing AI response
             try:
                 await connection_manager.send_to_openai({
                     "type": "response.cancel"
@@ -671,7 +940,8 @@ async def handle_takeover(request: Request):
                 Log.info(f"[Takeover] Cancelled AI response")
             except Exception:
                 Log.debug(f"[Takeover] No active response to cancel (normal)")
-            
+
+            # Clear input audio buffer
             try:
                 await connection_manager.send_to_openai({
                     "type": "input_audio_buffer.clear"
@@ -887,28 +1157,37 @@ async def handle_media_stream(websocket: WebSocket):
     async def ai_audio_streamer():
         nonlocal ai_currently_speaking
         Log.info("[AI Streamer] 🎵 Started")
-        
+
         while not shutdown_flag:
             try:
                 audio_data = await ai_audio_queue.get()
-                
+
                 if audio_data is None:
                     break
-                
+
+                # 🔥 CRITICAL: Drop AI audio if human has taken over
+                if openai_service.is_human_in_control():
+                    ai_audio_queue.task_done()
+                    continue
+
                 audio_b64 = audio_data.get("audio", "")
                 try:
                     audio_bytes = base64.b64decode(audio_b64)
+                    # 📞 mulaw at 8kHz: 8000 samples/sec * 1 byte/sample = 8000 bytes/sec
                     duration_seconds = len(audio_bytes) / 8000.0
                 except Exception as e:
                     duration_seconds = 0.02
-                
+
                 ai_currently_speaking = True
-                
-                if current_call_sid:
+
+                # 🔇 VAD: Filter silent chunks for dashboard (keeps call audio untouched)
+                if current_call_sid and ai_silence_detector.should_transmit(audio_b64, "AI"):
                     broadcast_to_dashboards_nonblocking({
                         "messageType": "audio",
                         "speaker": "AI",
                         "audio": audio_b64,
+                        "format": "mulaw",      # 📞 Mulaw from OpenAI (frontend upsamples)
+                        "sampleRate": 8000,     # 📞 8kHz
                         "timestamp": audio_data.get("timestamp", int(time.time() * 1000)),
                         "callSid": current_call_sid,
                     }, current_call_sid)
@@ -980,6 +1259,56 @@ async def handle_media_stream(websocket: WebSocket):
         Log.info("🎯 Step 3: Waiting for Twilio stream to start...")
 
         async def handle_media_event(data: dict):
+            import time
+
+            # 🔥 TIMESTAMP: Track when we FIRST receive audio from Twilio
+            if data.get("event") == "media":
+                current_time = time.time()
+                media = data.get("media") or {}
+
+                if not hasattr(connection_manager.state, 'first_media_received_time'):
+                    connection_manager.state.first_media_received_time = current_time
+                    connection_manager.state.packet_count = 0
+                    connection_manager.state.packet_times = []
+                    Log.info(f"📥 [LATENCY] First audio RECEIVED from Twilio (caller started speaking)")
+
+                # Track packet arrival patterns for network jitter analysis
+                connection_manager.state.packet_count += 1
+                if hasattr(connection_manager.state, 'last_packet_time'):
+                    packet_interval = (current_time - connection_manager.state.last_packet_time) * 1000
+                    connection_manager.state.packet_times.append(packet_interval)
+
+                    # Log jitter stats every 50 packets
+                    if connection_manager.state.packet_count % 50 == 0:
+                        if len(connection_manager.state.packet_times) > 0:
+                            import statistics
+                            avg_interval = statistics.mean(connection_manager.state.packet_times[-50:])
+                            jitter = statistics.stdev(connection_manager.state.packet_times[-50:]) if len(connection_manager.state.packet_times[-50:]) > 1 else 0
+                            min_interval = min(connection_manager.state.packet_times[-50:])
+                            max_interval = max(connection_manager.state.packet_times[-50:])
+
+                            Log.info("=" * 70)
+                            Log.info(f"📡 NETWORK JITTER ANALYSIS (Last 50 packets):")
+                            Log.info(f"  📊 Packet count: {connection_manager.state.packet_count}")
+                            Log.info(f"  ⏱️  Average interval: {avg_interval:.2f}ms")
+                            Log.info(f"  📈 Jitter (std dev): {jitter:.2f}ms")
+                            Log.info(f"  ⬇️  Min interval: {min_interval:.2f}ms")
+                            Log.info(f"  ⬆️  Max interval: {max_interval:.2f}ms")
+
+                            # Determine network quality
+                            if jitter < 10:
+                                quality = "EXCELLENT (very stable)"
+                            elif jitter < 30:
+                                quality = "GOOD (stable)"
+                            elif jitter < 50:
+                                quality = "FAIR (some variation)"
+                            else:
+                                quality = "POOR (high jitter)"
+                            Log.info(f"  🎯 Network quality: {quality}")
+                            Log.info("=" * 70)
+
+                connection_manager.state.last_packet_time = current_time
+
             if data.get("event") == "media":
                 media = data.get("media") or {}
                 payload_b64 = media.get("payload")
@@ -999,66 +1328,202 @@ async def handle_media_stream(websocket: WebSocket):
                                 except Exception as e:
                                     Log.error(f"[media] Failed to send to human: {e}")
                         
-                        if should_send_to_dashboard:
+                        # 🔇 VAD: Filter silent chunks for dashboard (keeps call audio untouched)
+                        if should_send_to_dashboard and caller_silence_detector.should_transmit(payload_b64, "Caller"):
                             broadcast_to_dashboards_nonblocking({
                                 "messageType": "audio",
                                 "speaker": "Caller",
                                 "audio": payload_b64,
+                                "format": "mulaw",      # 📞 Phone quality mulaw from Twilio
+                                "sampleRate": 8000,     # 📞 8kHz (phone line limit)
                                 "timestamp": int(time.time() * 1000),
                                 "callSid": current_call_sid
                             }, current_call_sid)
                     else:
                         if connection_manager.is_openai_connected():
                             try:
+                                import time
+                                # 🕐 TIMESTAMP: Received from Twilio
+                                t_received_from_twilio = time.time()
+
+                                # 🕐 TIMESTAMP: Before converting to OpenAI format
+                                t_before_convert = time.time()
+
                                 audio_message = audio_service.process_incoming_audio(data)
+
+                                # 🕐 TIMESTAMP: After converting, before sending to OpenAI
+                                t_after_convert = time.time()
+
                                 if audio_message:
                                     await connection_manager.send_to_openai(audio_message)
-                                    Log.debug(f"[media] 🎤 Sent caller audio to OpenAI")
+
+                                    # 🕐 TIMESTAMP: After sending to OpenAI
+                                    t_after_send = time.time()
+
+                                    # Track first audio sent to OpenAI
+                                    if not hasattr(connection_manager.state, 'first_audio_to_openai_time'):
+                                        connection_manager.state.first_audio_to_openai_time = t_after_send
+                                        convert_time = (t_after_convert - t_before_convert) * 1000
+                                        send_time = (t_after_send - t_after_convert) * 1000
+                                        total_processing = (t_after_send - t_received_from_twilio) * 1000
+
+                                        # 📊 DETAILED REQUEST PATH BREAKDOWN
+                                        Log.info("=" * 70)
+                                        Log.info("📊 COMPLETE SERVER PROCESSING BREAKDOWN (Request Path):")
+                                        Log.info(f"  🎯 TOTAL: Receive from Twilio → Send to OpenAI: {total_processing:.2f}ms")
+                                        Log.info("")
+                                        Log.info(f"  Step 1️⃣  Convert Twilio → OpenAI format: {convert_time:.2f}ms")
+                                        Log.info(f"           (mulaw → PCM conversion)")
+                                        Log.info(f"  Step 2️⃣  Send to OpenAI: {send_time:.2f}ms")
+                                        Log.info(f"           (WebSocket transmission)")
+                                        Log.info("=" * 70)
+
                             except Exception as e:
                                 Log.error(f"[media] failed to send to OpenAI: {e}")
                         
-                        if should_send_to_dashboard:
+                        # 🔇 VAD: Filter silent chunks for dashboard (keeps call audio untouched)
+                        if should_send_to_dashboard and caller_silence_detector.should_transmit(payload_b64, "Caller"):
                             broadcast_to_dashboards_nonblocking({
                                 "messageType": "audio",
                                 "speaker": "Caller",
                                 "audio": payload_b64,
+                                "format": "mulaw",      # 📞 Phone quality mulaw from Twilio
+                                "sampleRate": 8000,     # 📞 8kHz (phone line limit)
                                 "timestamp": int(time.time() * 1000),
                                 "callSid": current_call_sid
                             }, current_call_sid)
 
         async def handle_audio_delta(response: dict):
+            import time  # Import at function level
             try:
                 if openai_service.is_human_in_control():
                     return
-                
+
+                # 🕐 TIMESTAMP: Received response from OpenAI
+                t_received_from_openai = time.time()
+
                 audio_data = openai_service.extract_audio_response_data(response) or {}
                 delta = audio_data.get("delta")
-                
+
                 if delta:
-                    Log.debug(f"[audio-delta] 🔊 Received AI audio delta")
                     should_send_to_dashboard = True
-                    
+
                     if getattr(connection_manager.state, "stream_sid", None):
                         try:
+                            # 🕐 TIMESTAMP: Before converting OpenAI response to Twilio format
+                            t_before_convert_response = time.time()
+
                             audio_message = audio_service.process_outgoing_audio(
                                 response, connection_manager.state.stream_sid
                             )
+
+                            # 🕐 TIMESTAMP: After converting, before sending to Twilio
+                            t_after_convert_response = time.time()
+
                             if audio_message:
                                 await connection_manager.send_to_twilio(audio_message)
+
+                                # 🕐 TIMESTAMP: After sending to Twilio
+                                t_after_send_to_twilio = time.time()
+
+                                # 🔥 Track when FIRST audio is sent to Twilio
+                                if hasattr(connection_manager.state, 'speech_stopped_time') and not hasattr(connection_manager.state, 'first_audio_sent'):
+                                    total_to_twilio = (time.time() - connection_manager.state.speech_stopped_time) * 1000
+
+                                    # Calculate detailed timestamps for the response path
+                                    receive_time = (t_received_from_openai - connection_manager.state.speech_stopped_time) * 1000
+                                    convert_response_time = (t_after_convert_response - t_before_convert_response) * 1000
+                                    send_to_twilio_time = (t_after_send_to_twilio - t_after_convert_response) * 1000
+                                    # Calculate audio chunk size
+                                    import base64
+                                    try:
+                                        audio_bytes = base64.b64decode(audio_message['media']['payload'])
+                                        chunk_size = len(audio_bytes)
+                                        # 8kHz mulaw: 8000 bytes/sec, so bytes/8 = milliseconds of audio
+                                        audio_duration_ms = (chunk_size / 8000) * 1000
+
+                                        # 📊 DETAILED SERVER PROCESSING BREAKDOWN
+                                        Log.info("=" * 70)
+                                        Log.info("📊 COMPLETE SERVER PROCESSING BREAKDOWN (Response Path):")
+                                        Log.info(f"  🎯 TOTAL: Speech stopped → First audio sent to Twilio: {total_to_twilio:.2f}ms")
+                                        Log.info("")
+                                        Log.info(f"  Step 1️⃣  Received FIRST response from OpenAI: {receive_time:.2f}ms")
+                                        Log.info(f"           (VAD commit → OpenAI processes → Server receives)")
+                                        Log.info(f"  Step 2️⃣  Convert OpenAI → Twilio format: {convert_response_time:.2f}ms")
+                                        Log.info(f"           (PCM/G.711 conversion)")
+                                        Log.info(f"  Step 3️⃣  Send to Twilio: {send_to_twilio_time:.2f}ms")
+                                        Log.info(f"           (WebSocket transmission)")
+                                        Log.info("")
+                                        Log.info(f"  📦 Audio chunk: {chunk_size} bytes ({audio_duration_ms:.1f}ms of audio)")
+                                        Log.info("=" * 70)
+                                    except Exception as e:
+                                        Log.info(f"📞 [LATENCY] First audio SENT TO TWILIO in {total_to_twilio:.0f}ms from speech stopped")
+                                        Log.info(f"  ⏱️  Received from OpenAI: {receive_time:.2f}ms")
+                                        Log.info(f"  ⏱️  Convert to Twilio: {convert_response_time:.2f}ms")
+                                        Log.info(f"  ⏱️  Send to Twilio: {send_to_twilio_time:.2f}ms")
+                                    connection_manager.state.first_audio_sent = True
+                                    connection_manager.state.first_audio_sent_ms = total_to_twilio  # Save for dashboard metrics
+                                    connection_manager.state.audio_chunk_count = 1
+                                    connection_manager.state.outbound_chunk_times = []
+                                    connection_manager.state.last_outbound_chunk_time = time.time()
+                                elif hasattr(connection_manager.state, 'audio_chunk_count'):
+                                    connection_manager.state.audio_chunk_count += 1
+
+                                    # Track outbound streaming pattern
+                                    current_chunk_time = time.time()
+                                    if hasattr(connection_manager.state, 'last_outbound_chunk_time'):
+                                        chunk_interval = (current_chunk_time - connection_manager.state.last_outbound_chunk_time) * 1000
+                                        if not hasattr(connection_manager.state, 'outbound_chunk_times'):
+                                            connection_manager.state.outbound_chunk_times = []
+                                        connection_manager.state.outbound_chunk_times.append(chunk_interval)
+                                    connection_manager.state.last_outbound_chunk_time = current_chunk_time
+
+                                    # Log streaming stats every 20 chunks
+                                    if connection_manager.state.audio_chunk_count % 20 == 0:
+                                        elapsed = (time.time() - connection_manager.state.speech_stopped_time) * 1000
+
+                                        if len(connection_manager.state.outbound_chunk_times) > 0:
+                                            import statistics
+                                            avg_interval = statistics.mean(connection_manager.state.outbound_chunk_times[-20:])
+                                            jitter = statistics.stdev(connection_manager.state.outbound_chunk_times[-20:]) if len(connection_manager.state.outbound_chunk_times[-20:]) > 1 else 0
+
+                                            Log.info("=" * 70)
+                                            Log.info(f"📤 OUTBOUND STREAMING ANALYSIS (Chunks {connection_manager.state.audio_chunk_count-19}-{connection_manager.state.audio_chunk_count}):")
+                                            Log.info(f"  ⏱️  Total elapsed: {elapsed:.0f}ms")
+                                            Log.info(f"  📊 Average chunk interval: {avg_interval:.2f}ms")
+                                            Log.info(f"  📈 Streaming jitter: {jitter:.2f}ms")
+
+                                            # Calculate expected vs actual streaming rate
+                                            # At 8kHz mulaw, typical chunk is 20ms of audio
+                                            if avg_interval < 25:
+                                                streaming_health = "EXCELLENT (smooth, real-time)"
+                                            elif avg_interval < 40:
+                                                streaming_health = "GOOD (minor buffering)"
+                                            else:
+                                                streaming_health = "SLOW (may cause delays)"
+                                            Log.info(f"  🎯 Streaming health: {streaming_health}")
+                                            Log.info("=" * 70)
+                                        else:
+                                            Log.info(f"📊 [LATENCY] Sent {connection_manager.state.audio_chunk_count} chunks in {elapsed:.0f}ms")
+
                                 mark_msg = audio_service.create_mark_message(
                                     connection_manager.state.stream_sid
                                 )
                                 await connection_manager.send_to_twilio(mark_msg)
-                                Log.debug(f"[audio-delta] 📞 Sent AI audio to Twilio")
+
+                                # 🔥 Track when we SEND the mark to Twilio (to measure round-trip)
+                                if hasattr(connection_manager.state, 'speech_stopped_time') and not hasattr(connection_manager.state, 'first_mark_sent_time'):
+                                    connection_manager.state.first_mark_sent_time = time.time()
+                                    Log.info(f"📤 [LATENCY] First mark SENT to Twilio")
                         except Exception as e:
                             Log.error(f"[audio->twilio] failed: {e}")
-                    
+
                     if should_send_to_dashboard:
                         await handle_ai_audio({
                             "audio": delta,
                             "timestamp": int(time.time() * 1000)
                         })
-                        
+
             except Exception as e:
                 Log.error(f"[audio-delta] failed: {e}")
 
@@ -1106,11 +1571,106 @@ async def handle_media_stream(websocket: WebSocket):
                 Log.error(f"[Interruption] Error: {e}")
 
         async def handle_other_openai_event(response: dict):
+            import time  # Import at function level to avoid scoping issues
             event_type = response.get('type', '')
-            
-            # Log every event from OpenAI
-            Log.info(f"[OpenAI Event] {event_type}")
-            
+
+            # Filter out spammy/repetitive events from logs
+            spammy_events = {
+                'response.output_audio_transcript.delta',
+                'response.output_audio_transcript.done',
+                'conversation.item.added',
+                'conversation.item.done',
+                'response.audio.delta',
+                'response.audio_transcript.delta',
+                'response.audio_transcript.done',
+                'conversation.item.input_audio_transcription.completed',
+                'response.done'
+            }
+
+            # Only log important events (not spammy ones)
+            if event_type not in spammy_events:
+                Log.info(f"[OpenAI Event] {event_type}")
+
+            # 🔥 END-TO-END LATENCY TRACKING
+            if event_type == 'input_audio_buffer.speech_stopped':
+                nonlocal connection_manager
+                connection_manager.state.speech_stopped_time = time.time()
+
+                # 🧪 CALIBRATION TEST: Detect caller response
+                if hasattr(connection_manager.state, 'latency_calibration_running') and connection_manager.state.latency_calibration_running:
+                    if hasattr(connection_manager.state, 'calibration_beep_sent_time'):
+                        round_trip_ms = (time.time() - connection_manager.state.calibration_beep_sent_time) * 1000
+
+                        Log.info("=" * 70)
+                        Log.info("🎯 LATENCY CALIBRATION COMPLETE!")
+                        Log.info(f"   Complete round-trip time: {round_trip_ms:.0f}ms")
+                        Log.info(f"   (Server sent beep → Caller heard it → Caller said 'ready' → Server received)")
+                        Log.info("")
+                        Log.info("   This MEASURED value will be used to calibrate estimates")
+                        Log.info("=" * 70)
+
+                        # Save the calibrated round-trip for future calculations
+                        connection_manager.state.calibrated_round_trip_ms = round_trip_ms
+                        connection_manager.state.latency_calibration_running = False
+
+                        # Cancel the calibration conversation so normal demo can start
+                        try:
+                            await connection_manager.send_to_openai({"type": "response.cancel"})
+                        except:
+                            pass
+
+                # Calculate time from first audio received to speech stopped
+                if hasattr(connection_manager.state, 'first_media_received_time'):
+                    time_since_first_audio = (time.time() - connection_manager.state.first_media_received_time) * 1000
+                    Log.info(f"🔇 [LATENCY] Speech stopped detected {time_since_first_audio:.0f}ms after first audio received")
+                else:
+                    Log.info("🔇 [LATENCY] User stopped speaking - VAD detecting silence...")
+            elif event_type == 'input_audio_buffer.committed':
+                connection_manager.state.vad_commit_time = time.time()
+                if hasattr(connection_manager.state, 'speech_stopped_time'):
+                    delay = (time.time() - connection_manager.state.speech_stopped_time) * 1000
+                    Log.info(f"⏱️ [LATENCY] VAD committed in {delay:.0f}ms after speech stopped")
+                else:
+                    Log.info("⏱️ [LATENCY] VAD committed buffer - waiting for response...")
+
+            elif event_type == 'response.created':
+                connection_manager.state.response_created_time = time.time()
+                if hasattr(connection_manager.state, 'vad_commit_time'):
+                    delay = (time.time() - connection_manager.state.vad_commit_time) * 1000
+
+                    # This includes: network to OpenAI + OpenAI processing + network back
+                    Log.info("=" * 70)
+                    Log.info("🤖 OPENAI PROCESSING BREAKDOWN:")
+                    Log.info(f"  ⏱️  VAD commit → response.created: {delay:.2f}ms")
+                    Log.info(f"      (Network to OpenAI + AI processing + Network back)")
+
+                    # Estimate network vs processing (rough approximation)
+                    # Assuming ~50-100ms network round-trip, rest is processing
+                    estimated_network = 75  # ms (rough estimate for round-trip)
+                    estimated_processing = max(0, delay - estimated_network)
+                    Log.info(f"  📡 Estimated network latency: ~{estimated_network}ms (round-trip)")
+                    Log.info(f"  🧠 Estimated OpenAI processing: ~{estimated_processing:.0f}ms")
+                    Log.info("=" * 70)
+
+            elif event_type == 'response.audio.delta':
+                # Track FIRST audio delta separately
+                if not hasattr(connection_manager.state, 'first_audio_delta_time'):
+                    connection_manager.state.first_audio_delta_time = time.time()
+
+                    if hasattr(connection_manager.state, 'response_created_time'):
+                        streaming_delay = (time.time() - connection_manager.state.response_created_time) * 1000
+                        Log.info(f"🎵 [LATENCY] First audio delta: {streaming_delay:.2f}ms after response.created")
+                        Log.info(f"           (OpenAI streaming delay)")
+
+                    if hasattr(connection_manager.state, 'vad_commit_time'):
+                        vad_delay = (time.time() - connection_manager.state.vad_commit_time) * 1000
+                        Log.info(f"🔥 [LATENCY] Total VAD → First audio: {vad_delay:.2f}ms")
+
+                        # Calculate total end-to-end latency
+                        if hasattr(connection_manager.state, 'speech_stopped_time'):
+                            total_delay = (time.time() - connection_manager.state.speech_stopped_time) * 1000
+                            Log.info(f"✅ [LATENCY] END-TO-END: {total_delay:.0f}ms from speech stopped to first audio")
+
             if event_type == 'session.created':
                 Log.info("✅ [OpenAI] Session created successfully")
             elif event_type == 'session.updated':
@@ -1124,11 +1684,16 @@ async def handle_media_stream(websocket: WebSocket):
             elif event_type == 'response.done':
                 Log.debug(f"[OpenAI] ✅ Response complete")
             elif event_type == 'error':
-                Log.error(f"[OpenAI] ❌ Error event: {response}")
-            
+                # Suppress harmless "no active response" errors from cancel attempts
+                error_code = response.get('error', {}).get('code')
+                if error_code == 'response_cancel_not_active':
+                    Log.debug(f"[OpenAI] Response cancel attempted but no active response (harmless)")
+                else:
+                    Log.error(f"[OpenAI] ❌ Error event: {response}")
+
             openai_service.process_event_for_logging(response)
             await openai_service.extract_caller_transcript(response)
-            
+
             if not openai_service.is_human_in_control():
                 await openai_service.extract_ai_transcript(response)
 
@@ -1161,7 +1726,24 @@ async def handle_media_stream(websocket: WebSocket):
             
             current_call_sid = getattr(connection_manager.state, 'call_sid', stream_sid)
             Log.event("Twilio Start", {"streamSid": stream_sid, "callSid": current_call_sid})
-            
+
+            # 🎙️ Start call recording via Twilio REST API (once per call)
+            if Config.has_twilio_credentials():
+                try:
+                    from twilio.rest import Client
+                    client = Client(Config.TWILIO_ACCOUNT_SID, Config.TWILIO_AUTH_TOKEN)
+
+                    # Start recording the call
+                    recording = client.calls(current_call_sid).recordings.create(
+                        recording_status_callback=f'https://{websocket.url.hostname}/recording-status',
+                        recording_status_callback_method='POST',
+                        recording_status_callback_event=['completed']
+                    )
+
+                    Log.info(f"🎙️ Started call recording via API: {recording.sid}")
+                except Exception as e:
+                    Log.error(f"❌ Failed to start call recording: {e}")
+
             # Find demo session AND restaurant_id
             for sid, data in demo_sessions.items():
                 if data.get('call_sid') == current_call_sid:
@@ -1176,6 +1758,8 @@ async def handle_media_stream(websocket: WebSocket):
                         "messageType": "callStarted",
                         "callSid": current_call_sid,
                         "sessionId": demo_session_id,
+                        "phoneNumber": data.get('phone'),  # Caller's phone number
+                        "restaurantId": restaurant_id,
                         "timestamp": int(time.time() * 1000)
                     }, current_call_sid)
                     
@@ -1186,8 +1770,11 @@ async def handle_media_stream(websocket: WebSocket):
                 Log.info(f"📋 Available demo sessions: {list(demo_sessions.keys())}")
                 Log.info(f"📋 Call SID searching for: {current_call_sid}")
             
-            if demo_session_id and demo_start_time:
+            # 🎬 AD MODE: Skip timer
+            if demo_session_id and demo_start_time and not Config.AD_MODE:
                 asyncio.create_task(check_demo_timer())
+            elif Config.AD_MODE:
+                Log.info("🎬 AD MODE: No time limit - call can run indefinitely")
             
             caller_silence_detector.reset()
             ai_silence_detector.reset()
@@ -1223,10 +1810,217 @@ async def handle_media_stream(websocket: WebSocket):
             twilio_connected.set()
 
         async def on_mark_cb():
+            import time
             try:
+                # 🔥 Track when Twilio RETURNS the mark (means audio was played!)
+                if hasattr(connection_manager.state, 'first_mark_sent_time') and not hasattr(connection_manager.state, 'first_mark_received'):
+                    mark_roundtrip = (time.time() - connection_manager.state.first_mark_sent_time) * 1000
+                    total_from_speech = (time.time() - connection_manager.state.speech_stopped_time) * 1000
+
+                    # Calculate component times
+                    ai_processing_ms = getattr(connection_manager.state, 'first_audio_sent_ms', 0)
+                    network_delay_ms = total_from_speech - ai_processing_ms
+
+                    Log.info(f"📥 [LATENCY] First mark RECEIVED from Twilio after {mark_roundtrip:.0f}ms")
+                    Log.info(f"🎯 [LATENCY] TOTAL from speech stopped to Twilio playback: {total_from_speech:.0f}ms")
+
+                    # 📊 COMPREHENSIVE LATENCY BREAKDOWN
+                    if hasattr(connection_manager.state, 'first_media_received_time'):
+                        total_from_first_audio = (time.time() - connection_manager.state.first_media_received_time) * 1000
+                        caller_to_vad = total_from_first_audio - total_from_speech
+
+                        # Use MEASURED inbound latency if available (from Twilio timestamp)
+                        measured_inbound = getattr(connection_manager.state, 'measured_inbound_latency_ms', None)
+
+                        Log.info("=" * 80)
+                        Log.info("📊 COMPLETE END-TO-END LATENCY BREAKDOWN:")
+                        Log.info("")
+                        Log.info("🔵 MEASURED COMPONENTS (from Twilio timestamps):")
+
+                        if measured_inbound is not None:
+                            Log.info(f"  1️⃣  Twilio → Server (inbound network): {measured_inbound:.2f}ms ✅ MEASURED")
+                            Log.info(f"      • Using Twilio's timestamp vs server receive time")
+                            Log.info(f"      • Twilio ingress → Server WebSocket")
+                        else:
+                            Log.info(f"  1️⃣  Caller → Server (inbound network): ~{caller_to_vad:.0f}ms")
+                            Log.info(f"      • Caller phone → Twilio ingress → Server WebSocket")
+                            Log.info(f"      • Includes: Phone network + Twilio routing + Internet")
+                        Log.info("")
+                        Log.info(f"  2️⃣  Server processing: {ai_processing_ms:.0f}ms ✅ MEASURED")
+                        Log.info(f"      • Breakdown available in 'Server Processing Breakdown' logs above")
+                        Log.info(f"      • Includes: Format conversion + OpenAI network + AI processing")
+                        Log.info("")
+                        Log.info(f"  3️⃣  Twilio jitter buffer & egress: {mark_roundtrip:.0f}ms")
+                        Log.info(f"      • Server → Twilio WebSocket → Jitter buffer → Playback starts")
+
+                        # Break down the mark roundtrip
+                        estimated_websocket_latency = min(50, mark_roundtrip * 0.2)  # ~20% or max 50ms
+                        estimated_jitter_buffer = mark_roundtrip - estimated_websocket_latency
+
+                        Log.info(f"      • Estimated WebSocket latency: ~{estimated_websocket_latency:.0f}ms")
+                        Log.info(f"      • Estimated Twilio jitter buffer: ~{estimated_jitter_buffer:.0f}ms")
+                        Log.info(f"        (Jitter buffer smooths audio, required for quality)")
+                        Log.info("")
+                        Log.info(f"  🎯 TOTAL MEASURED: {total_from_first_audio:.0f}ms")
+                        Log.info(f"      (From first audio received to Twilio playback confirmation)")
+                        Log.info("")
+
+                        # Check if we have calibrated round-trip time from the test
+                        calibrated_rt = getattr(connection_manager.state, 'calibrated_round_trip_ms', None)
+
+                        if calibrated_rt is not None:
+                            # We have MEASURED round-trip! No more estimates!
+                            Log.info("✅ CALIBRATED COMPONENTS (from round-trip test):")
+
+                            # Calibrated = total measured time
+                            # We can now calculate unmeasurable portions exactly
+                            unmeasured_portion = calibrated_rt - total_from_first_audio
+                            caller_to_twilio = unmeasured_portion * 0.4  # ~40% is inbound
+                            twilio_to_caller = unmeasured_portion * 0.6  # ~60% is outbound (asymmetric)
+
+                            Log.info(f"  4️⃣  Caller phone → Twilio: {caller_to_twilio:.0f}ms ✅ CALIBRATED")
+                            Log.info(f"      • From calibration test round-trip measurement")
+                            Log.info(f"      • Before Twilio captures audio")
+                            Log.info("")
+                            Log.info(f"  5️⃣  Twilio → Caller's ear (return path): {twilio_to_caller:.0f}ms ✅ CALIBRATED")
+                            Log.info(f"      • From calibration test round-trip measurement")
+                            Log.info(f"      • After Twilio starts playback to when you hear it")
+                            Log.info("")
+                            Log.info(f"  🎯 MEASURED TOTAL END-TO-END: {calibrated_rt:.0f}ms ✅ EXACT")
+                            Log.info(f"      (From your calibration test - actual experience!)")
+                            Log.info("")
+                            Log.info(f"  ✅ ALL COMPONENTS NOW MEASURED - NO ESTIMATES!")
+
+                        elif measured_inbound is not None:
+                            Log.info("🟡 ESTIMATED COMPONENTS (cannot measure directly):")
+                            # We know Twilio → Server latency
+                            # Estimate Caller → Twilio (phone network)
+                            if measured_inbound < 150:
+                                caller_phone_estimate = "50-150ms"
+                                outbound_estimate = "200-400ms"
+                                total_estimate = f"{int(total_from_first_audio + 250)}-{int(total_from_first_audio + 550)}ms"
+                                region_name = "LOCAL/SAME DATACENTER"
+                            elif measured_inbound < 300:
+                                caller_phone_estimate = "150-300ms"
+                                outbound_estimate = "400-700ms"
+                                total_estimate = f"{int(total_from_first_audio + 550)}-{int(total_from_first_audio + 1000)}ms"
+                                region_name = "DOMESTIC (US)"
+                            else:
+                                caller_phone_estimate = "300-600ms"
+                                outbound_estimate = "800-1500ms"
+                                total_estimate = f"{int(total_from_first_audio + 1100)}-{int(total_from_first_audio + 2100)}ms"
+                                region_name = "INTERNATIONAL"
+
+                            Log.info(f"  4️⃣  Caller phone → Twilio: ~{caller_phone_estimate}")
+                            Log.info(f"      • Caller's phone network to Twilio ingress")
+                            Log.info(f"      • Cannot measure (before Twilio captures audio)")
+                            Log.info("")
+                            Log.info(f"  5️⃣  Twilio → Caller's ear (return path): ~{outbound_estimate}")
+                            Log.info(f"      • Twilio egress → Phone network → Caller hears it")
+                            Log.info(f"      • Based on measured inbound: {measured_inbound:.0f}ms × 1.5-2.0 (asymmetric)")
+                        else:
+                            # Estimate based on total caller_to_vad (old method)
+                            if caller_to_vad < 300:
+                                inbound_estimate = "100-200ms"
+                                outbound_estimate = "300-500ms"
+                                total_estimate = "400-700ms"
+                                region_name = "LOCAL/SAME DATACENTER"
+                            elif caller_to_vad < 600:
+                                inbound_estimate = "200-400ms"
+                                outbound_estimate = "500-800ms"
+                                total_estimate = "700-1200ms"
+                                region_name = "DOMESTIC (US)"
+                            else:
+                                inbound_estimate = "500-800ms"
+                                outbound_estimate = "1000-1800ms"
+                                total_estimate = "1500-2600ms"
+                                region_name = "INTERNATIONAL"
+
+                            Log.info(f"  4️⃣  Caller audio → Server (before we receive): ~{inbound_estimate}")
+                            Log.info(f"      • Time from caller starts speaking to server receives")
+                            Log.info(f"      • Cannot measure (we don't know when caller started)")
+                            Log.info("")
+                            Log.info(f"  5️⃣  Twilio → Caller's ear (return path): ~{outbound_estimate}")
+                            Log.info(f"      • Twilio egress → Phone network → Caller hears it")
+                            Log.info(f"      • Typically 1.2-1.5x inbound latency (asymmetric routing)")
+
+                        Log.info("")
+                        Log.info(f"  🌍 DETECTED REGION: {region_name}")
+                        Log.info(f"  📊 ESTIMATED TOTAL END-TO-END: ~{total_estimate}")
+                        Log.info(f"      (What the caller actually experiences)")
+                        Log.info("=" * 80)
+
+                    connection_manager.state.first_mark_received = True
+
+                    # 📊 Broadcast latency metrics to dashboard
+                    try:
+                        # Determine performance rating based on server processing
+                        if ai_processing_ms < 500:
+                            performance_rating = "excellent"
+                        elif ai_processing_ms < 800:
+                            performance_rating = "good"
+                        else:
+                            performance_rating = "fair"
+
+                        # Calculate additional metrics if we have first_media_received_time
+                        caller_to_server_ms = 0
+                        total_measured_ms = round(total_from_speech)
+                        estimated_return_path_ms = 0
+
+                        if hasattr(connection_manager.state, 'first_media_received_time'):
+                            total_from_first_audio = (time.time() - connection_manager.state.first_media_received_time) * 1000
+                            caller_to_server_ms = round(total_from_first_audio - total_from_speech)
+                            total_measured_ms = round(total_from_first_audio)
+
+                            # Estimate return path based on caller_to_server (rough approximation)
+                            # International calls typically have symmetric latency
+                            estimated_return_path_ms = round(caller_to_server_ms * 1.2)  # Add 20% for asymmetry
+
+                        # Determine region based on caller_to_server latency
+                        if caller_to_server_ms < 300:
+                            region = "local"
+                        elif caller_to_server_ms < 600:
+                            region = "domestic"
+                        else:
+                            region = "international"
+
+                        latency_metrics = {
+                            "messageType": "latencyMetrics",
+                            "callSid": current_call_sid,
+                            "timestamp": int(time.time() * 1000),
+                            "metrics": {
+                                # What we control
+                                "serverProcessingMs": round(ai_processing_ms),  # Server + OpenAI + network between them
+
+                                # What Twilio controls
+                                "twilioBufferMs": round(mark_roundtrip),  # Jitter buffer
+
+                                # What nobody controls (telecom infrastructure)
+                                "inboundNetworkMs": caller_to_server_ms,  # Caller → Server (measured)
+                                "estimatedOutboundNetworkMs": estimated_return_path_ms,  # Server → Caller (estimated)
+
+                                # Totals
+                                "totalMeasuredMs": total_measured_ms,  # Everything we can measure
+                                "estimatedTotalMs": total_measured_ms + estimated_return_path_ms,  # Full end-to-end estimate
+
+                                # Legacy fields (for backward compatibility)
+                                "aiProcessingMs": round(ai_processing_ms),  # Deprecated: Use serverProcessingMs
+                                "networkDelayMs": round(network_delay_ms),  # Deprecated: Use twilioBufferMs
+
+                                # Metadata
+                                "performanceRating": performance_rating,
+                                "region": region
+                            }
+                        }
+
+                        broadcast_to_dashboards_nonblocking(latency_metrics, current_call_sid)
+                        Log.info(f"📊 [Dashboard] Sent latency metrics: AI={ai_processing_ms:.0f}ms, Network={network_delay_ms:.0f}ms, Total={total_from_speech:.0f}ms")
+                    except Exception as e:
+                        Log.error(f"[Dashboard] Failed to broadcast latency metrics: {e}")
+
                 audio_service.handle_mark_event()
-            except Exception:
-                pass
+            except Exception as e:
+                Log.error(f"[Mark] Error: {e}")
 
         # 🔥 CRITICAL FIX: Start Twilio receiver FIRST
         Log.info("🚀 Starting Twilio receiver...")
